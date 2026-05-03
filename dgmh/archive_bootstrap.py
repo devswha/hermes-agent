@@ -312,6 +312,57 @@ def _persist_archive(entries: list[ArchiveEntry]) -> None:
     logger.info("Persisted %d archive entries to %s", len(entries), path)
 
 
+def bootstrap_archive_for_selection(
+    path: Path | None = None,
+) -> "list[select_parents_module.Generation]":
+    """Load persisted archive and convert entries to Generation objects for select_parents.
+
+    W2 amendment: helper that bridges bootstrap_archive() output with the
+    select_parents.py Generation dataclass. Does NOT change bootstrap_archive() API.
+
+    Applies selectable=True filter — disabled skills (selectable=False) are loaded
+    into the Generation objects with selectable=False so that select_parents() can
+    exclude them from selection candidates per v2 §BLOCKER 1.
+
+    Args:
+        path: Optional override for archive.jsonl path. Uses default if None.
+
+    Returns:
+        list[Generation] for all archive entries, with selectable flag preserved.
+        Returns empty list if archive.jsonl does not exist.
+    """
+    import importlib
+    select_parents_module = importlib.import_module("dgmh.select_parents")
+    Generation = select_parents_module.Generation
+
+    entries = load_archive(path)
+    generations = []
+    for entry in entries:
+        gen = Generation(
+            id=entry.skill_id,
+            score=entry.score,
+            compiled_children=entry.compiled_children,
+            generation_index=entry.generation_index,
+            selectable=entry.selectable,
+            extra={
+                "name": entry.name,
+                "category": entry.category,
+                "skill_path": entry.skill_path,
+                "content_hash": entry.content_hash,
+                "admitted_at": entry.admitted_at,
+            },
+        )
+        generations.append(gen)
+
+    selectable_count = sum(1 for g in generations if g.selectable)
+    logger.info(
+        "bootstrap_archive_for_selection: %d generations loaded (%d selectable)",
+        len(generations),
+        selectable_count,
+    )
+    return generations
+
+
 def load_archive(path: Path | None = None) -> list[ArchiveEntry]:
     """Load existing archive entries from JSONL. Returns [] if file missing."""
     target = path or _archive_jsonl_path()
