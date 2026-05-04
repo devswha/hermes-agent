@@ -25,6 +25,13 @@ class TestPrimerLoad(unittest.TestCase):
         self.assertIn("Voice injection", primer)
         self.assertIn("Take a position", primer)
 
+    def test_primer_includes_operator_voice_corpus(self) -> None:
+        primer = _load_humanness_primer()
+        self.assertIn("Operator voice ground truth", primer)
+        self.assertIn("devswha", primer)
+        # at least one verbatim sample present
+        self.assertIn("이모지 개띠껍네", primer)
+
 
 class TestPrimerAugmentation(unittest.TestCase):
     def test_augment_appends_primer_section(self) -> None:

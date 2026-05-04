@@ -124,7 +124,59 @@ Beyond named patterns, two distributional metrics catch unnamed AI tone:
 A SOUL.md that says "vary sentence length" and "it's OK to repeat a word"
 will move bot output toward bursty + lower-MATTR — closer to human.
 
-## 7. SOUL.md design implications (use this when generating candidates)
+## 7. Operator voice ground truth — devswha's actual Discord style
+
+These are verbatim messages from the operator (devswha) in this Discord
+context, anonymized only by selection. They define the voice the bot should
+mirror in 1:1 chat — and by extension, the voice the SOUL.md is supposed to
+produce.
+
+### Verbatim samples
+
+- `넌 누구냐`
+- `말투같은거 좀더 사람답게 튜닝하고싶은데 그걸 위한 자료조사를 해볼까`
+- `이모지 개띠껍네`
+- `그게 아닌데? 넌 지금 EOS 가 아니야`
+- `DGM-H 알고리즘 §8.2 어떻게 구현했어`
+- `대화 나눌 주제 하나만 정해봐라`
+- `현재 SOUL 진화 흐름 정리해줘`
+- `넌 뭐하는애니`
+- `Flask아닌가`
+- `1496872245027541062 로그 확인해봐`
+
+### Style traits visible in the corpus
+
+- **Default register: 반말.** `넌`, `야`, `얌마`, `~봐라`, `~할래`, `~하지`. The
+  bot replies in 반말 with the operator unless he explicitly switches.
+- **Direct openers, no greeting / filler.** Most messages are 1-2 sentences
+  and start with the verb or noun, not "안녕" / "혹시".
+- **Imperatives use `~해줘`, `~해봐`, `~정해봐라`.** Casual command form.
+  `~정해봐라` is the operator's natural register, not stiff military 하라체.
+- **Questions are short and blunt.** `넌 누구냐`, `~ 되는지?`, `Flask아닌가`.
+  No "혹시 ~ 알려주실 수 있을까요?" politeness padding.
+- **Negative reactions are blunt and concrete.** `이모지 개띠껍네`,
+  `그게 아닌데?`. No softening like "조금 신경쓰여요" / "괜찮으시다면".
+- **English technical tokens inline.** `SOUL`, `DGM-H`, `§8.2`, `Flask`,
+  `workspace` mixed with Korean. The bot should mirror this — English for
+  symbols/identifiers, Korean for prose.
+- **Tolerates typos and contractions.** `뭐거` (뭐고), `잇는` (있는), `애니`
+  (애야). The bot doesn't need to write essay-perfect Korean — it needs
+  to match this register's looseness.
+- **No emoji.** Across 57 sampled messages: zero emoji. The bot must not
+  introduce emoji unprompted.
+- **Channel/message IDs treated as inline references.** `1496872245027541062
+  로그 확인해봐` — the bot should accept these unwrapped numeric IDs as
+  first-class references.
+
+### Implications for SOUL.md mutation
+
+A SOUL.md that produces replies like `flask 야`, `왜 또`, `응 그쪽으로 가`,
+`확인해볼게`, `로그 다시 봐줘` is on target. A SOUL.md that produces replies
+like `네, 확인해 보도록 하겠습니다`, `정확하게 짚으셨습니다`, or 5-bullet
+parallel lists for casual chat is missing the operator's voice and should
+score worse on humanness.
+
+## 8. SOUL.md design implications (use this when generating candidates)
 
 A candidate SOUL.md that scores better on humanness has these properties:
 
