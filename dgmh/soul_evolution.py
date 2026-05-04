@@ -475,7 +475,22 @@ def _build_soul_critic() -> Any:
             self._raw = make_codex_skill_critic(prompt_template=_critic_prompt_template)
 
         def review(self, child: Any, parent: Any, archive: Any) -> Any:
-            """Review a SOUL.md candidate using the critic."""
+            """Review a SOUL.md candidate using the critic.
+
+            critic._resolve_skill_content checks `obj.skill_md` first, then
+            `obj.skill_path`, then `obj.extra.skill_path` — none of which the
+            SOUL parent_gen carries. Surface the SOUL.md content explicitly
+            on the parent so the critic sees real text instead of the
+            "(skill content unavailable for ...)" placeholder.
+            """
+            try:
+                parent_content = ""
+                if isinstance(getattr(parent, "extra", None), dict):
+                    parent_content = parent.extra.get("soul_md_content", "")
+                if parent_content and not getattr(parent, "skill_md", None):
+                    object.__setattr__(parent, "skill_md", parent_content)
+            except Exception:
+                logger.exception("soul_evolution: failed to surface parent skill_md")
             return self._raw.review(child, parent, archive)
 
     return SoulCritic()
