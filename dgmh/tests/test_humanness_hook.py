@@ -9,6 +9,7 @@ from unittest import mock
 from dgmh.hermes_integration.humanness_hook import (
     _prune_polluting_message,
     _should_score,
+    _structural_pollution_check,
 )
 
 
@@ -46,6 +47,53 @@ class TestShouldScore(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DGMH_HUMANNESS_MIN_CHARS": "20"}):
             os.environ.pop("DGMH_HUMANNESS_DISABLED", None)
             self.assertFalse(_should_score(text))
+
+
+class TestStructuralPollutionCheck(unittest.TestCase):
+    def test_clean_short_reply(self) -> None:
+        hit, flags = _structural_pollution_check("응 그쪽이지. 검증이 더 중요해.")
+        self.assertFalse(hit)
+        self.assertEqual(flags, [])
+
+    def test_5_bullet_polluting(self) -> None:
+        text = (
+            "주로 하는 일:\n"
+            "- 코드\n- 디버그\n- 테스트\n- Git\n- 문서화\n"
+        )
+        hit, flags = _structural_pollution_check(text)
+        self.assertTrue(hit)
+        self.assertTrue(any("bullet-list" in f for f in flags))
+        self.assertTrue(any("colon-introducing-list" in f for f in flags))
+
+    def test_bold_label_header(self) -> None:
+        hit, flags = _structural_pollution_check("**핵심:** 그건 좀 아닌 듯.")
+        self.assertTrue(hit)
+        self.assertIn("bold-label-header", flags)
+
+    def test_closing_hedge_single_line(self) -> None:
+        hit, flags = _structural_pollution_check("응 가자. 다만 코드는 알아야 해.")
+        self.assertTrue(hit)
+        self.assertIn("closing-caveat-hedge", flags)
+
+    def test_closing_hedge_multi_paragraph(self) -> None:
+        hit, flags = _structural_pollution_check("응 가자.\n그래도 위험해.")
+        self.assertTrue(hit)
+        self.assertIn("closing-caveat-hedge", flags)
+
+    def test_hedge_in_middle_does_not_trigger(self) -> None:
+        hit, flags = _structural_pollution_check(
+            "다만 그거랑 별개로 결과는 좋아."
+        )
+        self.assertFalse(hit)
+
+    def test_2_bullets_ok(self) -> None:
+        hit, _ = _structural_pollution_check("두 가지:\n- A\n- B")
+        self.assertFalse(hit)
+
+    def test_bullets_inside_code_block_ignored(self) -> None:
+        text = "Python 예시:\n```\n- elem1\n- elem2\n- elem3\n- elem4\n```"
+        hit, flags = _structural_pollution_check(text)
+        self.assertFalse(hit)
 
 
 class TestPruneLogic(unittest.TestCase):

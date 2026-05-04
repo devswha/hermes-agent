@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -42,6 +43,56 @@ _PATCH_FLAG = "_dgmh_humanness_patched"
 # bot mimics its own prior chatgpt-styled replies.
 _DEFAULT_PRUNE_THRESHOLD = 15.0
 _PRUNE_LOOKBACK_SECONDS = 600.0
+
+
+# Deterministic pre-check: regex patterns that flag obvious chatgpt-style
+# structure before paying for a Codex patina call. When any of these fire,
+# prune immediately. Patina runs anyway in parallel for telemetry and to
+# catch nuanced AI-tone that the regex cannot see.
+
+# 4+ bullet items at the start of lines (markdown - or * or numbered).
+_BULLET_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+\S", re.MULTILINE)
+# Bold markdown headers used as labels: **핵심:**, **주제:**, **요약:**, **결론:**
+_BOLD_LABEL_RE = re.compile(r"\*\*[^*\n]{1,30}[:：]\s*\*\*")
+# Colon-introducing-list: line ending in colon with bullets that follow
+_COLON_INTRO_RE = re.compile(
+    r"[^\n]+[:：]\s*\n(?:\s*(?:[-*]|\d+\.)\s+\S+\s*\n){3,}",
+    re.MULTILINE,
+)
+# Closing-caveat hedge — start of last paragraph OR start of last sentence.
+# Matches `\n` or sentence boundary `.` `!` `?` followed by hedge token,
+# anchored to the tail of the response.
+_CLOSING_HEDGE_RE = re.compile(
+    r"(?:[.!?]\s+|\n\s*)(?:그래도|다만|물론|한편)\s+[^\n]+[.!?]?\s*$"
+)
+
+
+def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
+    """Return (should_prune, list_of_matched_pattern_names).
+
+    Conservative — fires only on patterns the operator has flagged as
+    chatgpt-tells in casual chat. Skips when the response is mostly a code
+    block (the patterns inside fenced code don't count).
+    """
+    flags = []
+
+    # Strip fenced code blocks before checking; bullets inside code are fine.
+    stripped = re.sub(r"```[\s\S]*?```", "", content)
+
+    bullets = _BULLET_LINE_RE.findall(stripped)
+    if len(bullets) >= 4:
+        flags.append(f"bullet-list-4plus({len(bullets)})")
+
+    if _BOLD_LABEL_RE.search(stripped):
+        flags.append("bold-label-header")
+
+    if _COLON_INTRO_RE.search(stripped):
+        flags.append("colon-introducing-list")
+
+    if _CLOSING_HEDGE_RE.search(stripped):
+        flags.append("closing-caveat-hedge")
+
+    return (bool(flags), flags)
 
 
 def _read_soul_hash() -> str:
@@ -129,17 +180,35 @@ def _score_in_thread(
     text_length = len(content)
     pruned_count = 0
 
+    # Step 1: deterministic pre-check. Prune obvious structural pollution
+    # without waiting for the slow Codex patina round-trip.
+    structural_hit, struct_flags = _structural_pollution_check(content)
+    if structural_hit and not os.environ.get("DGMH_PRUNE_DISABLED"):
+        # Force prune by passing a synthetic high score above threshold.
+        pruned_pre = _prune_polluting_message(content, ai_score=999.0)
+        if pruned_pre:
+            logger.info(
+                "[humanness_hook] structural pre-prune (%s) removed %d row",
+                ",".join(struct_flags), pruned_pre,
+            )
+            pruned_count += pruned_pre
+
     try:
         from dgmh.patina_judge import score_humanness, PatinaScoreError
 
         try:
             result = score_humanness(content, lang="ko")
-            pruned_count = _prune_polluting_message(content, ai_score=result.ai_score)
-            if pruned_count:
-                logger.info(
-                    "[humanness_hook] pruned %d polluting reply (ai=%.1f >= threshold)",
-                    pruned_count, result.ai_score,
+            # Only attempt patina-based prune if the structural pre-check did
+            # not already remove the row.
+            if pruned_count == 0:
+                pruned_count = _prune_polluting_message(
+                    content, ai_score=result.ai_score
                 )
+                if pruned_count:
+                    logger.info(
+                        "[humanness_hook] pruned %d polluting reply (ai=%.1f >= threshold)",
+                        pruned_count, result.ai_score,
+                    )
             record = make_success_record(
                 chat_id=chat_id,
                 thread_id=thread_id,
@@ -153,6 +222,7 @@ def _score_in_thread(
                 elapsed_s=result.elapsed_s,
             )
             record["pruned"] = pruned_count
+            record["structural_flags"] = struct_flags
         except PatinaScoreError as exc:
             record = make_error_record(
                 chat_id=chat_id,
