@@ -318,15 +318,35 @@ def make_run_record(
 
 
 def summarize_bias_report(*args: Any, **kwargs: Any) -> RunRecordBiasSummary:
-    """Placeholder bias summarizer until W5.
+    """Convert a BiasReport to a RunRecordBiasSummary for run log persistence.
 
-    W5 will wire the real bias detector here. W4 returns a zero-counts struct
-    so loop.py can call this without needing the W5 bias module.
+    W5: first positional arg is a dgmh.bias_detector.BiasReport (or None).
+    W4 callers passing no arguments or arbitrary args receive a zero-counts
+    struct (forward-compatible: extra args are ignored).
 
-    Mirrors runLog.ts::summarizeBiasReport stub behavior for W4.
+    Args:
+        *args: first element, if present, is a BiasReport; rest ignored.
+        **kwargs: ignored (forward-compat for W4 callers).
+
+    Returns:
+        RunRecordBiasSummary with signal counts populated from the report.
     """
+    bias_report = args[0] if args else None
+    if bias_report is None:
+        return RunRecordBiasSummary(
+            inspected_generations=0,
+            signal_count=0,
+            severities={"info": 0, "concern": 0, "block": 0},
+        )
+    # Duck-type: accept BiasReport objects (avoid circular import)
+    inspected = getattr(bias_report, "inspected_generations", 0)
+    signals = getattr(bias_report, "signals", [])
+    counts: dict[str, int] = {"info": 0, "concern": 0, "block": 0}
+    for sig in signals:
+        sev = getattr(sig, "severity", "info")
+        counts[sev] = counts.get(sev, 0) + 1
     return RunRecordBiasSummary(
-        inspected_generations=0,
-        signal_count=0,
-        severities={"info": 0, "concern": 0, "block": 0},
+        inspected_generations=inspected,
+        signal_count=len(signals),
+        severities=counts,
     )

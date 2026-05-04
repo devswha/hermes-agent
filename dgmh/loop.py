@@ -61,6 +61,7 @@ from dgmh.run_log import (
     make_run_record,
     summarize_bias_report,
 )
+from dgmh.bias_detector import make_heuristic_skill_bias_detector
 from dgmh.select_parents import (
     Generation,
     DgmhHyperparams,
@@ -465,13 +466,24 @@ def run_one_iteration(opts: IterationOpts) -> IterationResult:
 
     # Always emit one RunRecord
     archive_size_post = len(archive)
+
+    # Invoke bias detector on post-iteration archive (W5 wiring).
+    # Replaces W4 placeholder zero-counts. On concern/block, logs to stderr
+    # but does NOT block the iteration (operator-visible signal, not crash).
+    _bias_detector = make_heuristic_skill_bias_detector()
+    try:
+        bias_report = _bias_detector.detect(archive, recent_n=20)
+    except Exception as exc:
+        logger.error("loop: bias detector failed: %s", exc)
+        bias_report = None
+
     run_record = make_run_record(
         seed=seed,
         archive_size_pre=archive_size_pre,
         archive_size_post=archive_size_post,
         accepted_children=accepted_children,
         rejections=rejections,
-        bias=summarize_bias_report(),
+        bias=summarize_bias_report(bias_report),
     )
 
     try:
