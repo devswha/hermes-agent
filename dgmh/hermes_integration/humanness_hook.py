@@ -66,6 +66,27 @@ _CLOSING_HEDGE_RE = re.compile(
     r"(?:[.!?]\s+|\n\s*)(?:그래도|다만|물론|한편)\s+[^\n]+[.!?]?\s*$"
 )
 
+# Unprompted bio-recitation. The operator already knows the bot is their
+# personal assistant on Hermes Agent with DGM-H — repeating it in casual
+# replies reads as bot-like self-promotion. Trigger when 2+ of these
+# phrases appear together in a single response.
+_BIO_RECITATION_TOKENS = (
+    "Hermes Agent",
+    "DGM-H",
+    "self-evolution",
+    "self-evolving",
+    "self improvement",
+    "persona",
+    "개인 어시스턴트",
+    "예전 flask 프로젝트",
+    "flask 프로젝트랑은 무관",
+    "flask 프로젝트와는 무관",
+    "튜닝되는 skill",
+    "튜닝되는 스킬",
+    "evolve via DGM-H",
+    "feedback-driven self",
+)
+
 
 def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     """Return (should_prune, list_of_matched_pattern_names).
@@ -91,6 +112,10 @@ def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
 
     if _CLOSING_HEDGE_RE.search(stripped):
         flags.append("closing-caveat-hedge")
+
+    bio_hits = [t for t in _BIO_RECITATION_TOKENS if t in stripped]
+    if len(bio_hits) >= 2:
+        flags.append(f"bio-recitation({len(bio_hits)}:{','.join(bio_hits[:3])})")
 
     return (bool(flags), flags)
 
