@@ -1,0 +1,4 @@
+name: dgmh-honcho
+description: "DGM-H Honcho — mirror Discord messages to local Honcho memory layer for peer modeling and session context"
+events:
+  - gateway:startup

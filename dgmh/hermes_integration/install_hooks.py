@@ -41,6 +41,16 @@ def install_humanness_hook() -> None:
     print(f"[install_hooks] Installed dgmh-humanness hook to {dst}")
 
 
+def install_honcho_hook() -> None:
+    """Copy the dgmh-honcho hook directory to ~/.hermes/hooks/dgmh-honcho/."""
+    src = Path(__file__).parent / "hooks" / "dgmh-honcho"
+    dst = _hermes_home() / "hooks" / "dgmh-honcho"
+    dst.mkdir(parents=True, exist_ok=True)
+    for filename in ("HOOK.yaml", "handler.py"):
+        shutil.copy2(src / filename, dst / filename)
+    print(f"[install_hooks] Installed dgmh-honcho hook to {dst}")
+
+
 def patch_config_yaml() -> None:
     """Add dgmh.gate_native_review: true to ~/.hermes/config.yaml (idempotent)."""
     import yaml  # type: ignore[import]
@@ -69,6 +79,7 @@ def patch_config_yaml() -> None:
 def main() -> None:
     install_reaction_hook()
     install_humanness_hook()
+    install_honcho_hook()
     patch_config_yaml()
     print("[install_hooks] Done. Restart hermes-gateway to activate.")
 
