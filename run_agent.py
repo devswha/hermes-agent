@@ -2888,7 +2888,29 @@ class AIAgent:
         main session. The review prompt is appended as the next user turn in the
         forked conversation. Writes directly to the shared memory/skill stores.
         Never modifies the main conversation history or produces user-visible output.
+
+        DGM-H gate (plan v2 §CONCERN 3): if dgmh.gate_native_review is true in
+        ~/.hermes/config.yaml, skip the background review to prevent dueling
+        writers while DGM-H is actively managing SOUL.md / skill evolution.
+        See dgmh/HERMES_PATCH_NOTES.md for the full patch rationale.
         """
+        # DGM-H native-review gate — upstream-eligible patch
+        try:
+            import os as _os
+            from pathlib import Path as _Path
+            _hermes_home = _Path(_os.environ.get("HERMES_HOME") or (_Path.home() / ".hermes"))
+            _cfg_path = _hermes_home / "config.yaml"
+            if _cfg_path.exists():
+                import yaml as _yaml
+                _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                if (_cfg.get("dgmh") or {}).get("gate_native_review"):
+                    logger.debug(
+                        "DGM-H gate: skipping background review (dgmh.gate_native_review=true)"
+                    )
+                    return
+        except Exception:
+            pass  # Gate check is best-effort; fall through if config unreadable
+
         import threading
 
         # Pick the right prompt based on which triggers fired

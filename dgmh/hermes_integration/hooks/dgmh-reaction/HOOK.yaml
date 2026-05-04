@@ -1,0 +1,4 @@
+name: dgmh-reaction
+description: "DGM-H W6 — wire Discord reaction events to SOUL.md evolution pipeline"
+events:
+  - gateway:startup
