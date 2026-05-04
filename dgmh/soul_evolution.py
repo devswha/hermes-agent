@@ -345,6 +345,47 @@ def _append_soul_run_record(record: SoulRunRecord, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _load_humanness_primer() -> str:
+    """Load the patina-derived humanness primer if present, else return empty.
+
+    The primer is optional — absence falls back to the stock skill-modifier
+    prompt so SOUL evolution still works without it.
+    """
+    primer_path = (
+        Path(__file__).resolve().parent / "prompts" / "humanness-primer.md"
+    )
+    try:
+        return primer_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning(
+            "soul_evolution: humanness primer not found at %s — proceeding without it",
+            primer_path,
+        )
+        return ""
+
+
+def _augment_with_humanness_primer(base_template: str) -> str:
+    """Append the humanness primer to a base prompt template, if available.
+
+    The primer is appended as a clearly-marked Reference section. Codex sees
+    both the original mutation/critique instructions and the humanness target
+    framework in one prompt.
+    """
+    primer = _load_humanness_primer()
+    if not primer.strip():
+        return base_template
+    separator = (
+        "\n\n---\n\n"
+        "## Reference: Humanness Primer (SOUL.md domain)\n\n"
+        "The following primer comes from the patina humanness skill and "
+        "describes the target the SOUL.md mutation should move toward — "
+        "less AI-tone in the bot's resulting Discord replies, especially "
+        "Korean casual chat. Apply it as evaluation framework when proposing "
+        "or critiquing the candidate skill_md.\n\n"
+    )
+    return base_template + separator + primer
+
+
 def _build_soul_modifier() -> Any:
     """Build a modifier that generates a new SOUL.md candidate via the critic prompt."""
     from pathlib import Path as _Path
@@ -352,7 +393,8 @@ def _build_soul_modifier() -> Any:
     from dgmh.select_parents import Generation
 
     _prompt_path = _Path(__file__).resolve().parent / "prompts" / "skill-modifier.md"
-    _prompt_template = _prompt_path.read_text(encoding="utf-8")
+    _base_template = _prompt_path.read_text(encoding="utf-8")
+    _prompt_template = _augment_with_humanness_primer(_base_template)
 
     class SoulModifier:
         """Wraps SkillModifier for SOUL.md domain."""
@@ -425,7 +467,8 @@ def _build_soul_critic() -> Any:
     from dgmh.critic import make_codex_skill_critic
 
     _critic_prompt_path = _Path(__file__).resolve().parent / "prompts" / "skill-critic.md"
-    _critic_prompt_template = _critic_prompt_path.read_text(encoding="utf-8")
+    _base_critic_template = _critic_prompt_path.read_text(encoding="utf-8")
+    _critic_prompt_template = _augment_with_humanness_primer(_base_critic_template)
 
     class SoulCritic:
         def __init__(self) -> None:
