@@ -35,6 +35,14 @@ _DEFAULT_MIN_CHARS = 30
 _ERROR_PREFIXES = ("Error:", "⚠️", "❌", "[error]")
 _PATCH_FLAG = "_dgmh_humanness_patched"
 
+# Pruning: when an assistant reply scores at or above this AI-likeness
+# threshold, the row in state.db.messages is deleted so it does not
+# pollute the conversation history that Hermes feeds into the next
+# system prompt build. This breaks the self-reinforcing loop where the
+# bot mimics its own prior chatgpt-styled replies.
+_DEFAULT_PRUNE_THRESHOLD = 15.0
+_PRUNE_LOOKBACK_SECONDS = 600.0
+
 
 def _read_soul_hash() -> str:
     """Compute sha256 of the active SOUL.md content (used as generation tag)."""
@@ -63,6 +71,52 @@ def _should_score(content: str) -> bool:
     return True
 
 
+def _prune_polluting_message(content: str, *, ai_score: float) -> int:
+    """Delete the polluting assistant row from state.db.messages.
+
+    Matches by exact content + role=assistant + recent timestamp so the
+    delete is conservative — same prose in the last few minutes is almost
+    certainly the message we just scored. Returns the number of rows
+    deleted (0 or 1 in practice).
+
+    Disabled by setting DGMH_PRUNE_DISABLED. Threshold overridden via
+    DGMH_PRUNE_AI_THRESHOLD (default 15.0).
+    """
+    import sqlite3
+
+    if os.environ.get("DGMH_PRUNE_DISABLED"):
+        return 0
+
+    threshold = float(
+        os.environ.get("DGMH_PRUNE_AI_THRESHOLD", _DEFAULT_PRUNE_THRESHOLD)
+    )
+    if ai_score < threshold:
+        return 0
+
+    db_path = (
+        Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")) / "state.db"
+    )
+    if not db_path.exists():
+        logger.info("humanness_hook: state.db not found at %s, skip prune", db_path)
+        return 0
+
+    try:
+        con = sqlite3.connect(str(db_path), timeout=5.0)
+        cur = con.cursor()
+        n = cur.execute(
+            "DELETE FROM messages "
+            "WHERE role = 'assistant' AND content = ? "
+            "AND timestamp > strftime('%s','now') - ?",
+            (content, _PRUNE_LOOKBACK_SECONDS),
+        ).rowcount
+        con.commit()
+        con.close()
+        return n
+    except Exception:
+        logger.exception("humanness_hook: prune query failed")
+        return 0
+
+
 def _score_in_thread(
     *,
     content: str,
@@ -73,12 +127,19 @@ def _score_in_thread(
     """Run patina scoring on a background thread and append the record."""
     soul_hash = _read_soul_hash()
     text_length = len(content)
+    pruned_count = 0
 
     try:
         from dgmh.patina_judge import score_humanness, PatinaScoreError
 
         try:
             result = score_humanness(content, lang="ko")
+            pruned_count = _prune_polluting_message(content, ai_score=result.ai_score)
+            if pruned_count:
+                logger.info(
+                    "[humanness_hook] pruned %d polluting reply (ai=%.1f >= threshold)",
+                    pruned_count, result.ai_score,
+                )
             record = make_success_record(
                 chat_id=chat_id,
                 thread_id=thread_id,
@@ -91,6 +152,7 @@ def _score_in_thread(
                 interpretation=result.interpretation,
                 elapsed_s=result.elapsed_s,
             )
+            record["pruned"] = pruned_count
         except PatinaScoreError as exc:
             record = make_error_record(
                 chat_id=chat_id,

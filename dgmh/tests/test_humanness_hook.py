@@ -6,7 +6,10 @@ import os
 import unittest
 from unittest import mock
 
-from dgmh.hermes_integration.humanness_hook import _should_score
+from dgmh.hermes_integration.humanness_hook import (
+    _prune_polluting_message,
+    _should_score,
+)
 
 
 class TestShouldScore(unittest.TestCase):
@@ -43,6 +46,144 @@ class TestShouldScore(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DGMH_HUMANNESS_MIN_CHARS": "20"}):
             os.environ.pop("DGMH_HUMANNESS_DISABLED", None)
             self.assertFalse(_should_score(text))
+
+
+class TestPruneLogic(unittest.TestCase):
+    """End-to-end test of _prune_polluting_message against a temp state.db."""
+
+    def _make_db(self, tmpdir: str, rows: list[tuple[str, str, str]]) -> str:
+        """Build a state.db at HERMES_HOME=tmpdir with given (session, role, content) rows.
+
+        Timestamp is set to 'now' for all rows so the lookback window catches them.
+        """
+        import sqlite3
+        from pathlib import Path
+
+        db = Path(tmpdir) / "state.db"
+        con = sqlite3.connect(str(db))
+        con.executescript(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+            "role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL);"
+        )
+        import time
+
+        now = time.time()
+        for sid, role, content in rows:
+            con.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                (sid, role, content, now),
+            )
+        con.commit()
+        con.close()
+        return str(db)
+
+    def _count(self, db: str) -> int:
+        import sqlite3
+
+        con = sqlite3.connect(db)
+        c = con.execute("SELECT count(*) FROM messages").fetchone()[0]
+        con.close()
+        return c
+
+    def test_high_score_prunes_assistant_row(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "user", "야"),
+                    ("s1", "assistant", "5-bullet polluting reply text here"),
+                ],
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    "5-bullet polluting reply text here",
+                    ai_score=20.0,
+                )
+            self.assertEqual(n, 1)
+            self.assertEqual(self._count(db), 1)
+
+    def test_low_score_does_not_prune(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "assistant", "clean human reply"),
+                ],
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    "clean human reply",
+                    ai_score=5.0,
+                )
+            self.assertEqual(n, 0)
+            self.assertEqual(self._count(db), 1)
+
+    def test_disabled_env_skips_prune(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "assistant", "polluting reply"),
+                ],
+            )
+            with mock.patch.dict(
+                os.environ, {"HERMES_HOME": tmp, "DGMH_PRUNE_DISABLED": "1"}
+            ):
+                n = _prune_polluting_message(
+                    "polluting reply",
+                    ai_score=50.0,
+                )
+            self.assertEqual(n, 0)
+            self.assertEqual(self._count(db), 1)
+
+    def test_threshold_env_override(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "assistant", "moderate reply"),
+                ],
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"HERMES_HOME": tmp, "DGMH_PRUNE_AI_THRESHOLD": "5"},
+            ):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    "moderate reply",
+                    ai_score=8.0,
+                )
+            self.assertEqual(n, 1)
+
+    def test_user_messages_not_pruned(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "user", "high score user text"),
+                ],
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    "high score user text",
+                    ai_score=99.0,
+                )
+            self.assertEqual(n, 0)
+            self.assertEqual(self._count(db), 1)
 
 
 if __name__ == "__main__":
