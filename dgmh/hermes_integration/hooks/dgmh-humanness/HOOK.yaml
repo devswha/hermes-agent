@@ -1,0 +1,4 @@
+name: dgmh-humanness
+description: "DGM-H C2 — score Discord assistant outputs with patina, log to humanness_log.jsonl"
+events:
+  - gateway:startup
