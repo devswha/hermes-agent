@@ -32,6 +32,17 @@ class TestPrimerLoad(unittest.TestCase):
         # at least one verbatim sample present
         self.assertIn("이모지 개띠껍네", primer)
 
+    def test_primer_includes_group_chat_register(self) -> None:
+        primer = _load_humanness_primer()
+        self.assertIn("group chat 해요체-casual register", primer)
+        self.assertIn("Register-switching insight", primer)
+
+    def test_primer_includes_english_commit_voice(self) -> None:
+        primer = _load_humanness_primer()
+        self.assertIn("Operator English voice", primer)
+        self.assertIn("Conventional Commits", primer)
+        self.assertIn("verb-first", primer)
+
 
 class TestPrimerAugmentation(unittest.TestCase):
     def test_augment_appends_primer_section(self) -> None:
