@@ -175,6 +175,93 @@ def get_operator_representation(channel_id: str, thread_id: Optional[str] = None
         return ""
 
 
+_REP_CACHE: dict[str, tuple[float, str]] = {}
+_REP_CACHE_TTL_S = 600.0  # 10 minutes
+
+
+def _is_high_quality_snapshot(text: str) -> bool:
+    """Reject noisy / hallucinated / English-leaning snapshots.
+
+    The local Ollama model often:
+      - replies in English even when asked Korean
+      - admits "no signal" / "not explicitly stated"
+      - hallucinates ("honcho is a term of endearment")
+
+    Inject only when the snapshot is short, mostly Korean, and does not
+    contain the obvious 'no signal' / 'no information' / 'not stated'
+    patterns.
+    """
+    if not text or len(text) < 30:
+        return False
+
+    lowered = text.lower()
+    noise_markers = (
+        "no matching messages",
+        "no signal",
+        "not explicitly stated",
+        "not enough information",
+        "appears that",
+        "based on the available information",
+        "based on the conversation snippets",
+        "term of endearment",
+        "i don't have",
+        "i do not have",
+        "cannot determine",
+        "no real signal yet",
+    )
+    for m in noise_markers:
+        if m in lowered:
+            return False
+
+    # Korean character ratio. Hangul block U+AC00–U+D7A3.
+    han_count = sum(1 for ch in text if "가" <= ch <= "힣")
+    ratio = han_count / max(1, len(text))
+    if ratio < 0.30:
+        return False
+
+    return True
+
+
+def get_cached_operator_snapshot(query: str | None = None) -> str:
+    """Return a short, cached, quality-gated description of the operator.
+
+    Empty string is returned when:
+      - Honcho is disabled / unreachable
+      - the snapshot fails the quality gate (too short, too English,
+        hallucinated, or 'no signal yet' admission)
+      - the cache holds an empty (rejected) result still within TTL
+    """
+    import time
+
+    if _is_disabled():
+        return ""
+
+    key = (query or "default").strip()[:120]
+    now = time.monotonic()
+    cached = _REP_CACHE.get(key)
+    if cached and (now - cached[0]) < _REP_CACHE_TTL_S:
+        return cached[1]
+
+    q = query or (
+        "한국어로만 답해. 다음에 대해 1-3개 짧은 문장으로 적어: "
+        "1) devswha의 register (반말/해요체 중 어느 쪽인지). "
+        "2) 자주 나오는 주제. "
+        "3) 봇이 기억해야 할 선호 (예: 이모지 안 씀, bullet list 싫어함). "
+        "단, 충분한 근거가 없으면 그냥 '근거 없음' 한 단어만 답해. "
+        "추측하지 말 것."
+    )
+    raw = chat_about_operator(q).strip()
+
+    if not _is_high_quality_snapshot(raw):
+        _REP_CACHE[key] = (now, "")
+        return ""
+
+    if len(raw) > 600:
+        raw = raw[:600]
+    _REP_CACHE[key] = (now, raw)
+    return raw
+
+
 def chat_about_operator(query: str) -> str:
     """Ask Honcho a natural-language question about the operator. Empty on fail."""
     if _is_disabled():

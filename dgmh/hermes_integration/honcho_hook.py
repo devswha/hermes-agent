@@ -173,6 +173,58 @@ def _wrap_on_message(adapter: Any) -> None:
     logger.info("[honcho_hook] registered on_message mirror listener")
 
 
+_PROMPT_AUGMENT_FLAG = "_dgmh_honcho_prompt_augmented"
+
+
+def _augment_load_soul_md() -> None:
+    """Patch agent.prompt_builder.load_soul_md to append Honcho operator snapshot.
+
+    Idempotent — wrap-once. After patching, every agent boot that calls
+    load_soul_md gets SOUL.md content followed by a small "Operator
+    memory snapshot" block sourced from Honcho's peer model. Empty or
+    unavailable snapshot → fall through to plain SOUL.md content.
+    """
+    try:
+        import agent.prompt_builder as pb
+    except ImportError:
+        logger.warning("[honcho_hook] agent.prompt_builder not importable; skip patch")
+        return
+
+    if getattr(pb, _PROMPT_AUGMENT_FLAG, False):
+        logger.info("[honcho_hook] load_soul_md already augmented")
+        return
+
+    original = getattr(pb, "load_soul_md", None)
+    if original is None:
+        logger.warning("[honcho_hook] load_soul_md missing; skip patch")
+        return
+
+    def _patched_load_soul_md():
+        base = original()
+        if not base:
+            return base
+        try:
+            from dgmh.honcho_client import get_cached_operator_snapshot
+
+            snap = get_cached_operator_snapshot()
+            if snap:
+                addendum = (
+                    "\n\n## Operator memory snapshot (from Honcho, may be partial)\n\n"
+                    "이 블록은 Honcho 가 운영자 과거 대화를 보고 추출한 짧은 요약이야. "
+                    "절대값이 아니라 참고 신호 — SOUL.md 본문 룰이 우선이고, 이 블록은 "
+                    "tone / 관심사 / 최근 작업 흐름 정도만 거든다.\n\n"
+                    f"{snap}\n"
+                )
+                return base + addendum
+        except Exception:
+            logger.exception("[honcho_hook] augmenter failed; falling back")
+        return base
+
+    pb.load_soul_md = _patched_load_soul_md  # type: ignore[assignment]
+    setattr(pb, _PROMPT_AUGMENT_FLAG, True)
+    logger.info("[honcho_hook] augmented load_soul_md with operator snapshot")
+
+
 async def _wait_and_patch(adapter: Any) -> None:
     try:
         for _ in range(60):
@@ -191,6 +243,7 @@ async def _wait_and_patch(adapter: Any) -> None:
 
         _wrap_send(adapter)
         _wrap_on_message(adapter)
+        _augment_load_soul_md()
     except Exception:
         logger.exception("[honcho_hook] _wait_and_patch failed")
 
