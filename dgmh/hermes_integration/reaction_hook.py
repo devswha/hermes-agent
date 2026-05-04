@@ -248,20 +248,15 @@ async def _handle_reaction_event(payload: Any, adapter: Any) -> None:
     allowed_user_ids = _get_allowed_user_ids(adapter)
     allowed_channels = _get_allowed_channels(adapter)
 
-    # Filter: only process operator's reactions in allowed channels, not bot's own
-    if not should_process_reaction(
-        reactor_user_id, channel_id, bot_user_id, allowed_user_ids, allowed_channels
-    ):
-        logger.debug(
-            "[reaction_hook] Ignoring reaction from user=%d channel=%d emoji=%s",
-            reactor_user_id,
-            channel_id,
-            emoji_str,
-        )
-        return
+    logger.info(
+        "[reaction_hook] Reaction received: user=%d channel=%d emoji=%s msg=%d",
+        reactor_user_id, channel_id, emoji_str, message_id,
+    )
 
-    # Check this is a reaction on a bot message
-    # We need to verify the message was sent by the bot
+    # Resolve thread channels to their parent channel for the allowed-channels
+    # filter — Discord auto-threads have their own channel ID distinct from the
+    # parent. We fetch the channel here once to discover parent_id, then use
+    # the parent for the channel-allowlist check.
     client = getattr(adapter, "_client", None)
     if client is None:
         return
@@ -272,8 +267,33 @@ async def _handle_reaction_event(payload: Any, adapter: Any) -> None:
             try:
                 channel = await client.fetch_channel(channel_id)
             except Exception:
-                logger.debug("[reaction_hook] Could not fetch channel %d", channel_id)
+                logger.info("[reaction_hook] Could not fetch channel %d — skipping", channel_id)
                 return
+    except Exception as exc:
+        logger.info("[reaction_hook] channel lookup error: %s", exc)
+        return
+
+    # If this channel is a thread, the effective channel for filtering is the parent.
+    effective_channel_id = channel_id
+    parent_obj = getattr(channel, "parent", None)
+    if parent_obj is not None and hasattr(parent_obj, "id"):
+        effective_channel_id = parent_obj.id
+        logger.info(
+            "[reaction_hook] Thread %d resolved to parent %d for filter",
+            channel_id, effective_channel_id,
+        )
+
+    # Filter: only process operator's reactions in allowed channels, not bot's own
+    if not should_process_reaction(
+        reactor_user_id, effective_channel_id, bot_user_id, allowed_user_ids, allowed_channels
+    ):
+        logger.info(
+            "[reaction_hook] Filter rejected reaction: user=%d effective_channel=%d (allowed=%s) bot_user=%s",
+            reactor_user_id, effective_channel_id, allowed_channels, bot_user_id,
+        )
+        return
+
+    try:
 
         # Fetch the message to check authorship
         try:

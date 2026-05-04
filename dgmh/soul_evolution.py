@@ -322,8 +322,12 @@ def _append_soul_run_record(record: SoulRunRecord, path: Path) -> None:
 
 def _build_soul_modifier() -> Any:
     """Build a modifier that generates a new SOUL.md candidate via the critic prompt."""
-    from dgmh.modifier import SkillModifier
+    from pathlib import Path as _Path
+    from dgmh.modifier import make_codex_skill_modifier
     from dgmh.select_parents import Generation
+
+    _prompt_path = _Path(__file__).resolve().parent / "prompts" / "skill-modifier.md"
+    _prompt_template = _prompt_path.read_text(encoding="utf-8")
 
     class SoulModifier:
         """Wraps SkillModifier for SOUL.md domain."""
@@ -344,10 +348,10 @@ def _build_soul_modifier() -> Any:
 
             # Use SkillModifier for the actual LLM call, adapted for SOUL.md
             try:
-                raw_modifier = SkillModifier()
+                raw_modifier = make_codex_skill_modifier(prompt_template=_prompt_template)
                 # Create a synthetic parent Generation for skill modifier
                 synth_parent = Generation(
-                    id="soul/SOUL",
+                    id=parent.id,
                     score=parent.score,
                     compiled_children=0,
                     generation_index=parent.generation_index,
@@ -392,13 +396,19 @@ def _build_soul_modifier_prompt(parent_content: str, archive: Any) -> str:
 
 def _build_soul_critic() -> Any:
     """Build a critic for SOUL.md domain."""
-    from dgmh.critic import SkillCritic
+    from pathlib import Path as _Path
+    from dgmh.critic import make_codex_skill_critic
+
+    _critic_prompt_path = _Path(__file__).resolve().parent / "prompts" / "skill-critic.md"
+    _critic_prompt_template = _critic_prompt_path.read_text(encoding="utf-8")
 
     class SoulCritic:
+        def __init__(self) -> None:
+            self._raw = make_codex_skill_critic(prompt_template=_critic_prompt_template)
+
         def review(self, child: Any, parent: Any, archive: Any) -> Any:
             """Review a SOUL.md candidate using the critic."""
-            raw_critic = SkillCritic()
-            return raw_critic.review(child, parent, archive)
+            return self._raw.review(child, parent, archive)
 
     return SoulCritic()
 
@@ -466,7 +476,7 @@ def run_soul_evolution(opts: SoulEvolutionOpts) -> bool:
             break
 
     parent_gen = Generation(
-        id="soul/SOUL",
+        id=f"soul/gen-{next_gen_index - 1}",
         score=score_before,
         compiled_children=0,
         generation_index=next_gen_index - 1,
