@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -113,6 +114,30 @@ def compute_score(pos: int, neg: int) -> float:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+_FRONTMATTER_NAME_RE = re.compile(
+    r"^---\s*\n(.*?)\n---", re.DOTALL
+)
+_NAME_LINE_RE = re.compile(r"^\s*name\s*:\s*([A-Za-z0-9_-]+)\s*$", re.MULTILINE)
+
+
+def _derive_soul_skill_id(soul_md_content: str) -> str:
+    """Extract `soul/<name>` skill_id from SOUL.md YAML frontmatter.
+
+    Codex modifier expects lineage[-1] == parent_id, where parent_id follows
+    the `<category>/<name>` pattern. Codex derives <name> from the YAML
+    `name:` field at the top of the markdown, so we must use the same.
+    Falls back to "soul/SOUL" only when no frontmatter is present (gen-0
+    legacy plain-text SOUL.md).
+    """
+    fm_match = _FRONTMATTER_NAME_RE.match(soul_md_content)
+    if fm_match:
+        block = fm_match.group(1)
+        name_match = _NAME_LINE_RE.search(block)
+        if name_match:
+            return f"soul/{name_match.group(1).lower()}"
+    return "soul/SOUL"
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +393,7 @@ def _build_soul_modifier() -> Any:
                 new_hash = _sha256(new_content)
                 new_lineage = list(parent_lineage) + [parent_hash]
                 return SkillCandidate(
-                    skill_id="soul/SOUL",
+                    skill_id=_derive_soul_skill_id(new_content),
                     skill_md=new_content,
                     lineage=new_lineage,
                     raw_codex_output=result.raw_codex_output,
@@ -476,7 +501,7 @@ def run_soul_evolution(opts: SoulEvolutionOpts) -> bool:
             break
 
     parent_gen = Generation(
-        id=f"soul/gen-{next_gen_index - 1}",
+        id=_derive_soul_skill_id(parent_content),
         score=score_before,
         compiled_children=0,
         generation_index=next_gen_index - 1,
