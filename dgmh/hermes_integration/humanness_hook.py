@@ -262,6 +262,47 @@ def _wrap_send(adapter: Any) -> None:
         reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ):
+        # Pre-send rewrite: if the outbound content has clear structural
+        # pollution AND rewrite is enabled, rewrite it via Codex before
+        # actually posting to Discord. The user sees only the cleaned text.
+        # This is gated by DGMH_REWRITE_ENABLED to allow disabling in tests
+        # or under high latency budgets.
+        rewrite_enabled = (
+            bool(os.environ.get("DGMH_REWRITE_ENABLED"))
+            and not os.environ.get("DGMH_REWRITE_DISABLED")
+        )
+        if rewrite_enabled and _should_score(content):
+            structural_hit, struct_flags = _structural_pollution_check(content)
+            if structural_hit:
+                try:
+                    from dgmh.patina_judge import humanness_rewrite
+
+                    rewritten = await asyncio.to_thread(
+                        humanness_rewrite, content, timeout_s=60.0
+                    )
+                    if rewritten and rewritten != content:
+                        # Sanity: don't replace if rewrite still has pollution.
+                        rew_hit, _ = _structural_pollution_check(rewritten)
+                        if not rew_hit:
+                            logger.info(
+                                "[humanness_hook] pre-send rewrite applied "
+                                "(flags=%s len=%d→%d)",
+                                ",".join(struct_flags),
+                                len(content),
+                                len(rewritten),
+                            )
+                            content = rewritten
+                        else:
+                            logger.info(
+                                "[humanness_hook] rewrite still polluted (%s); "
+                                "keeping original",
+                                struct_flags,
+                            )
+                except Exception:
+                    logger.exception(
+                        "[humanness_hook] pre-send rewrite failed; using original"
+                    )
+
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
 
         try:

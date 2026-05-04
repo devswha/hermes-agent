@@ -217,6 +217,95 @@ def score_humanness(
     )
 
 
+_REWRITE_PROMPT_TEMPLATE = """다음은 디스코드 1:1 캐주얼 채팅에서 한 봇의 응답이야. 이 응답에는 ChatGPT 처럼 보이는 구조적 anti-pattern 들이 들어 있어. 같은 의미를 유지하면서 그 anti-pattern 들만 제거해서 다시 써줘.
+
+제거할 것:
+- bullet/번호 리스트 4개 이상 평행 구조 (필요하면 1-2개로 줄이거나 prose 로 풀어쓰기)
+- bold markdown 라벨 (`**핵심:**`, `**주제:**`, `**요약:**`, `**결론:**`)
+- 콜론 introducing list 패턴 (`이렇게 가자:` 뒤에 bullet 들)
+- 닫는 caveat hedge (마지막 문단/문장이 `그래도`, `다만`, `물론`, `한편` 으로 시작하면서 본론을 약화시키는 경우)
+- 결론 신호어 (`결론적으로`, `요컨대`, `종합하면`)
+- 챗봇 filler (`좋은 질문`, `도움이 되셨으면`, `궁금한 점이 있으시면`)
+- 학술풍 phrasing (`가능성이 커`, `~로 변모`, `비중이 내려가고`)
+
+유지할 것:
+- 모든 사실 / 수치 / 고유명사 / 영어 기술 토큰 (SOUL, DGM-H, gpt-5.5 등)
+- 코드 블록 (\`\`\` 펜스 안의 내용은 절대 수정하지 말고 그대로 보존)
+- 운영자 어조: 1:1 디스코드 캐주얼 반말 (`~해`, `~야`, `~이지`, `~거든`)
+- 응답의 핵심 메시지
+
+출력 규칙:
+- 1-4문장의 짧고 흐르는 prose 로 줄여 (캐주얼 reply 면 1-2문장이 이상적)
+- 가능하면 120자 이하
+- 메타 설명/preamble 없이 다시 쓴 한국어 텍스트만 출력
+- 수정 사항 설명 절대 X
+
+원본 응답:
+---
+{text}
+---
+
+다시 쓴 응답 (한국어 텍스트만):"""
+
+
+_REWRITE_DEFAULT_TIMEOUT_S = 60.0
+
+
+def humanness_rewrite(
+    text: str,
+    *,
+    timeout_s: float = _REWRITE_DEFAULT_TIMEOUT_S,
+    codex_bin: Optional[str] = None,
+) -> Optional[str]:
+    """Rewrite a Korean Discord reply to strip chatgpt-style anti-patterns.
+
+    Calls the Codex CLI via subprocess with a prompt that names exactly the
+    patterns to remove and the operator's voice traits to preserve. Returns
+    the rewritten text, or None if Codex fails / times out / produces empty
+    output.
+
+    The caller decides what to do with the result (e.g., replace the
+    outbound message content). On any failure the caller falls back to the
+    original text — never blocking the send path.
+    """
+    if not text or not text.strip():
+        return None
+
+    binary = codex_bin or os.environ.get("DGMH_CODEX_BIN", "codex")
+    prompt = _REWRITE_PROMPT_TEMPLATE.format(text=text)
+
+    try:
+        result = subprocess.run(
+            [binary, "exec", "-"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            encoding="utf-8",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning("humanness_rewrite: codex invocation failed: %s", exc)
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "humanness_rewrite: codex exited %d; stderr=%s",
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
+        return None
+
+    out = (result.stdout or "").strip()
+    # Codex often echoes a thinking/header preamble before the actual answer.
+    # Heuristic: take everything after the last "---" separator if present;
+    # otherwise return the whole stdout. Sanity-check by length and content.
+    if "\n---\n" in out:
+        out = out.rsplit("\n---\n", 1)[-1].strip()
+    if not out or len(out) < 5:
+        return None
+    return out
+
+
 def composite_reward(
     *,
     human_likeness: float,
