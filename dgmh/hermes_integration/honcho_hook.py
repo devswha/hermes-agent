@@ -120,6 +120,65 @@ def _wrap_send(adapter: Any) -> None:
     logger.info("[honcho_hook] wrapped DiscordAdapter.send for honcho mirror")
 
 
+_PATCH_FLAG_ROLE_MENT = "_dgmh_role_mention_promoted"
+
+
+def _promote_role_mentions(adapter: Any) -> None:
+    """Monkey-patch client.on_message so a role mention pointing at any of
+    the bot's own roles is promoted to a direct user mention.
+
+    Discord.py exposes message.role_mentions and message.mentions separately.
+    Hermes' adapter checks ONLY message.mentions for the require_mention
+    gate, so a `<@&role-id>` to a role the bot is in does not currently
+    trigger a response. This wrapper appends client.user to message.mentions
+    when any role-mention overlaps with the bot's role set, so the existing
+    require_mention path naturally accepts the message.
+    """
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        logger.warning("[honcho_hook] no _client; skip role-mention promote")
+        return
+    if getattr(client, _PATCH_FLAG_ROLE_MENT, False):
+        logger.info("[honcho_hook] role-mention promote already patched")
+        return
+
+    original = getattr(client, "on_message", None)
+    if not callable(original):
+        logger.warning(
+            "[honcho_hook] client.on_message not set; cannot wrap for role mentions"
+        )
+        return
+
+    async def wrapped_on_message(message):
+        try:
+            role_mentions = getattr(message, "role_mentions", None) or []
+            guild = getattr(message, "guild", None)
+            if role_mentions and guild is not None:
+                bot_member = getattr(guild, "me", None)
+                if bot_member is not None:
+                    bot_role_ids = {r.id for r in getattr(bot_member, "roles", [])}
+                    if any(r.id in bot_role_ids for r in role_mentions):
+                        if client.user not in message.mentions:
+                            try:
+                                message.mentions.append(client.user)
+                                logger.info(
+                                    "[honcho_hook] promoted role mention to user "
+                                    "mention for message %s", message.id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "[honcho_hook] could not append client.user "
+                                    "to message.mentions"
+                                )
+        except Exception:
+            logger.exception("[honcho_hook] role-mention promote failed")
+        await original(message)
+
+    client.on_message = wrapped_on_message  # type: ignore[assignment]
+    setattr(client, _PATCH_FLAG_ROLE_MENT, True)
+    logger.info("[honcho_hook] wrapped client.on_message for role-mention promotion")
+
+
 def _wrap_on_message(adapter: Any) -> None:
     """Wrap discord.py's on_message handler to mirror inbound operator messages."""
     client = getattr(adapter, "_client", None)
@@ -243,6 +302,7 @@ async def _wait_and_patch(adapter: Any) -> None:
 
         _wrap_send(adapter)
         _wrap_on_message(adapter)
+        _promote_role_mentions(adapter)
         _augment_load_soul_md()
     except Exception:
         logger.exception("[honcho_hook] _wait_and_patch failed")
