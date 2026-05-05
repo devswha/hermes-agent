@@ -50,19 +50,29 @@ _PRUNE_LOOKBACK_SECONDS = 600.0
 # prune immediately. Patina runs anyway in parallel for telemetry and to
 # catch nuanced AI-tone that the regex cannot see.
 
-# 4+ bullet items at the start of lines (markdown - or * or numbered).
+# 3+ bullet items at the start of lines (markdown - or * or numbered).
+# Lowered from 4+ to 3+ after live-Discord case where a 3-bullet "이 세 범위"
+# reply slipped through scoring as ai=2.2 / flags=[] but read as chatgpt-style.
 _BULLET_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+\S", re.MULTILINE)
-# Bold markdown headers used as labels: **핵심:**, **주제:**, **요약:**, **결론:**
-_BOLD_LABEL_RE = re.compile(r"\*\*[^*\n]{1,30}[:：]\s*\*\*")
+# Bold markdown labels used to head a list:
+#   **핵심:**, **주제:**             (colon inside bold)
+#   **이 세 범위**야:, **요약**입니다: (colon outside bold + short suffix)
+# Either form reads as bot-style label-prefix.
+_BOLD_LABEL_RE = re.compile(
+    r"\*\*[^*\n]{1,30}\*\*[가-힣ㄱ-ㅎ\sA-Za-z]{0,8}[:：]"
+    r"|\*\*[^*\n]{1,30}[:：]\s*\*\*"
+)
 # ATX-style markdown headers (## ~~, ### ~~) — chatgpt-style tutorial structure
 # in Discord casual chat reads as bot-like. One header is acceptable for a
 # truly long doc; 2+ in a single reply is the failure mode.
 _ATX_HEADER_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S", re.MULTILINE)
 # Chunk continuation markers like "(1/4)", "(2/3)", "(part 2/3)"
 _CHUNK_MARKER_RE = re.compile(r"\(\s*(?:part\s*)?\d+\s*/\s*\d+\s*\)\s*$", re.IGNORECASE)
-# Colon-introducing-list: line ending in colon with bullets that follow
+# Colon-introducing-list: a line ending in `:` followed (optionally after
+# blank lines) by 3+ bullet/numbered items. Allows blank lines between the
+# colon line and the bullets — Discord markdown often inserts them.
 _COLON_INTRO_RE = re.compile(
-    r"[^\n]+[:：]\s*\n(?:\s*(?:[-*]|\d+\.)\s+\S+\s*\n){3,}",
+    r"[^\n]+[:：]\s*\n+(?:\s*(?:[-*]|\d+\.)\s+\S[^\n]*\n+){3,}",
     re.MULTILINE,
 )
 # Closing-caveat hedge — start of last paragraph OR start of last sentence.
@@ -107,8 +117,8 @@ def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     stripped = re.sub(r"```[\s\S]*?```", "", content)
 
     bullets = _BULLET_LINE_RE.findall(stripped)
-    if len(bullets) >= 4:
-        flags.append(f"bullet-list-4plus({len(bullets)})")
+    if len(bullets) >= 3:
+        flags.append(f"bullet-list-3plus({len(bullets)})")
 
     if _BOLD_LABEL_RE.search(stripped):
         flags.append("bold-label-header")
