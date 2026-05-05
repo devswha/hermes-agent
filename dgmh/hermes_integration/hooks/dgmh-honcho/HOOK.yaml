@@ -2,3 +2,7 @@ name: dgmh-honcho
 description: "DGM-H Honcho — mirror Discord messages to local Honcho memory layer for peer modeling and session context"
 events:
   - gateway:startup
+# Step 0 (v3) — wrap-order documentation. Lower priority runs LAST →
+# wraps OUTERMOST around adapter.send. honcho mirrors the post-rewrite
+# content into the peer memory model.
+priority: 50

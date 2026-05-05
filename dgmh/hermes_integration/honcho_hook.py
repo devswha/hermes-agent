@@ -115,6 +115,11 @@ def _wrap_send(adapter: Any) -> None:
             logger.exception("[honcho_hook] failed to dispatch bot mirror")
         return result
 
+    # Wrap-order markers (Step 0): honcho is the OUTERMOST wrapper; walking
+    # ``__wrapped__`` from here should yield ``humanness → original_send``.
+    wrapped_send.__dgmh_hook_name__ = "honcho"  # type: ignore[attr-defined]
+    wrapped_send.__wrapped__ = original_send  # type: ignore[attr-defined]
+
     adapter.send = wrapped_send  # type: ignore[assignment]
     setattr(adapter, _PATCH_FLAG_SEND, True)
     logger.info("[honcho_hook] wrapped DiscordAdapter.send for honcho mirror")
@@ -304,6 +309,19 @@ async def _wait_and_patch(adapter: Any) -> None:
         _wrap_on_message(adapter)
         _promote_role_mentions(adapter)
         _augment_load_soul_md()
+        # Wrap-order verification (Step 0). honcho is the outermost wrapper,
+        # so by the time this runs the full chain ``[honcho, humanness]`` is
+        # in place if humanness wrapped first. If humanness wrapped after
+        # honcho, the chain shows ``[humanness, honcho]`` and the helper
+        # logs an error so the operator notices at startup.
+        try:
+            from dgmh.hermes_integration.wrap_order import verify_wrap_chain
+
+            verify_wrap_chain(adapter)
+        except Exception:
+            logger.exception(
+                "[honcho_hook] wrap-order verification raised; continuing"
+            )
     except Exception:
         logger.exception("[honcho_hook] _wait_and_patch failed")
 

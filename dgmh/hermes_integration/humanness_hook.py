@@ -379,6 +379,12 @@ def _wrap_send(adapter: Any) -> None:
 
         return result
 
+    # Wrap-order markers (Step 0): expose hook identity + the original
+    # callable so dgmh.hermes_integration.wrap_order can walk the chain
+    # outer→inner and assert ``["honcho", "humanness"]`` at startup.
+    wrapped_send.__dgmh_hook_name__ = "humanness"  # type: ignore[attr-defined]
+    wrapped_send.__wrapped__ = original_send  # type: ignore[attr-defined]
+
     adapter.send = wrapped_send  # type: ignore[assignment]
     setattr(adapter, _PATCH_FLAG, True)
     logger.info("[humanness_hook] wrapped DiscordAdapter.send for patina scoring")
@@ -393,6 +399,17 @@ async def _wait_and_patch(adapter: Any) -> None:
                 break
             await asyncio.sleep(0.5)
         _wrap_send(adapter)
+        # Best-effort wrap-order check; partner hook (honcho) may not have
+        # wrapped yet on startup, in which case this logs a warning. The
+        # last hook to finish wrapping observes the full chain.
+        try:
+            from dgmh.hermes_integration.wrap_order import verify_wrap_chain
+
+            verify_wrap_chain(adapter)
+        except Exception:
+            logger.exception(
+                "[humanness_hook] wrap-order verification raised; continuing"
+            )
     except Exception:
         logger.exception("[humanness_hook] _wait_and_patch failed")
 
