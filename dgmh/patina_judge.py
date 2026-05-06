@@ -393,16 +393,45 @@ def humanness_rewrite_with_profile(
     out = (result.stdout or "").strip()
     if not out:
         return None
+
+    # Patina v3.10+ wraps the rewrite with two trailing metadata blocks:
+    #
+    #   ```yaml
+    #   phase_6:
+    #     tone: ...
+    #   ```
+    #
+    #   ---
+    #   tone: ...
+    #   tone_evidence: []
+    #   ---
+    #
+    # Both must be stripped — they are internal pipeline metadata, never
+    # meant for the user. Cut everything from the first ```yaml fence or the
+    # final ``---`` frontmatter onward.
+    cut_idx = len(out)
+    for marker_re in (
+        re.compile(r"\n\s*```yaml\s*\n", re.IGNORECASE),
+        re.compile(r"\n\s*```yml\s*\n", re.IGNORECASE),
+        # Trailing frontmatter block: a line of ``---`` followed by tone:/key: lines.
+        re.compile(r"\n\s*---\s*\n[\s\S]*?(tone|tone_source|tone_evidence|tone_confidence)\s*:"),
+    ):
+        m = marker_re.search(out)
+        if m and m.start() < cut_idx:
+            cut_idx = m.start()
+    if cut_idx < len(out):
+        out = out[:cut_idx].rstrip()
+
     # Patina prepends an analyst preamble paragraph (e.g.
-    # "아직 AI 티 나는 부분: ...") before the actual rewrite. Drop ONLY the
+    # "아직 AI 티 나는 부분: ...", "남아 있는 AI 느낌: ..."). Drop ONLY the
     # first block if it matches the preamble heuristic; join the rest so
     # legitimate multi-paragraph rewrites are preserved intact.
     blocks = re.split(r"\n\s*\n", out)
     if blocks:
         first = blocks[0].strip()
         is_preamble = bool(
-            re.match(r"^(아직|남은)\s*AI\s*티", first)
-            or re.search(r"AI\s*티", first[:60])
+            re.match(r"^(아직|남은|남아 있는)\s*AI\s*(티|느낌|표현)", first)
+            or re.search(r"AI\s*(티|느낌|표현)", first[:60])
         )
         if is_preamble and len(blocks) > 1:
             blocks = blocks[1:]
