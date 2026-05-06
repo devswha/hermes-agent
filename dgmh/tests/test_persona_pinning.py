@@ -235,5 +235,66 @@ class TestAC10VoiceBoundsAcrossCycles(unittest.TestCase):
                     self.assertLessEqual(n, 85)
 
 
+class TestPersonaEnvConfig(unittest.TestCase):
+    """Step 9 (v3) — DGMH_PUBLIC_PERSONA_NAME / DGMH_PUBLIC_PERSONA_AVATAR_URL."""
+
+    def test_default_persona_name(self) -> None:
+        import os
+        from unittest import mock
+
+        from dgmh.persona_pinning import (
+            DEFAULT_PUBLIC_PERSONA_NAME,
+            public_persona_name,
+        )
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DGMH_PUBLIC_PERSONA_NAME", None)
+            self.assertEqual(public_persona_name(), DEFAULT_PUBLIC_PERSONA_NAME)
+            self.assertEqual(public_persona_name(), "flask")
+
+    def test_persona_name_env_override(self) -> None:
+        import os
+        from unittest import mock
+
+        from dgmh.persona_pinning import public_persona_name
+
+        with mock.patch.dict(
+            os.environ, {"DGMH_PUBLIC_PERSONA_NAME": "haru"}
+        ):
+            self.assertEqual(public_persona_name(), "haru")
+
+    def test_avatar_url_unset_returns_none(self) -> None:
+        import os
+        from unittest import mock
+
+        from dgmh.persona_pinning import public_persona_avatar_url
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DGMH_PUBLIC_PERSONA_AVATAR_URL", None)
+            self.assertIsNone(public_persona_avatar_url())
+
+    def test_avatar_url_env_override(self) -> None:
+        import os
+        from unittest import mock
+
+        from dgmh.persona_pinning import public_persona_avatar_url
+
+        with mock.patch.dict(
+            os.environ, {"DGMH_PUBLIC_PERSONA_AVATAR_URL": "https://x/y.png"}
+        ):
+            self.assertEqual(public_persona_avatar_url(), "https://x/y.png")
+
+    def test_avatar_url_empty_string_returns_none(self) -> None:
+        import os
+        from unittest import mock
+
+        from dgmh.persona_pinning import public_persona_avatar_url
+
+        with mock.patch.dict(
+            os.environ, {"DGMH_PUBLIC_PERSONA_AVATAR_URL": "  "}
+        ):
+            self.assertIsNone(public_persona_avatar_url())
+
+
 if __name__ == "__main__":
     unittest.main()

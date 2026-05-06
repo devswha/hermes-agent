@@ -230,6 +230,29 @@ def _enforce_voice_block(
     return revised, drift
 
 
+# ---------------------------------------------------------------------------
+# Step 9 (v3) — persona env config (Phase-1 documented; Phase-2 consumed).
+# ---------------------------------------------------------------------------
+#
+# These accessors centralize reads of the public-persona env knobs so the
+# Phase-2 webhook relay (Step W) can pick them up without reaching into
+# os.environ at every call site.
+
+DEFAULT_PUBLIC_PERSONA_NAME = "flask"
+
+
+def public_persona_name() -> str:
+    """Display name the persona uses on public surfaces. Default "flask"."""
+    return os.environ.get("DGMH_PUBLIC_PERSONA_NAME", DEFAULT_PUBLIC_PERSONA_NAME)
+
+
+def public_persona_avatar_url() -> Optional[str]:
+    """Avatar URL for the public persona. Phase-2 webhook relay will pass
+    this as the webhook avatar; Phase-1 reads it for forward compatibility."""
+    val = os.environ.get("DGMH_PUBLIC_PERSONA_AVATAR_URL", "").strip()
+    return val or None
+
+
 def enforce_persona_invariants(
     parent_soul_md: str,
     child_soul_md: str,
