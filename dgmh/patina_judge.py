@@ -307,6 +307,95 @@ def humanness_rewrite(
     return out
 
 
+_REWRITE_PROFILE_DEFAULT_TIMEOUT_S = 30.0
+
+
+def humanness_rewrite_with_profile(
+    text: str,
+    *,
+    profile: str = "social",
+    backend: str = "codex-cli",
+    lang: str = "ko",
+    timeout_s: float = _REWRITE_PROFILE_DEFAULT_TIMEOUT_S,
+    patina_bin: Optional[str] = None,
+) -> Optional[str]:
+    """Programmatic invocation of ``patina --profile <profile> --backend <backend>``.
+
+    This is the public-channel rewrite surface (Step P1, plan v3). The
+    existing :func:`humanness_rewrite` stays unchanged so the 1:1 humanness
+    pipeline keeps its current behavior.
+
+    Patina without ``--score`` / ``--audit`` runs in rewrite mode: stdin
+    carries the source text, stdout carries the rewritten text. The
+    ``social`` profile amplifies casual / fragment / first-person voice,
+    which is what we want for the public persona.
+
+    Args:
+        text: Source Korean Discord reply.
+        profile: Patina profile. Default ``"social"`` for casual public chat.
+        backend: Patina LLM backend. Default ``"codex-cli"`` (free via Codex
+            ChatGPT OAuth — no API key needed).
+        lang: Language code passed to patina. Default ``"ko"``.
+        timeout_s: Subprocess timeout in seconds.
+        patina_bin: Optional override for the patina.js path.
+
+    Returns:
+        The rewritten text on success, or ``None`` on any failure (binary
+        missing, timeout, non-zero exit, empty output). On ``None`` the
+        caller decides the fallback — typical chain is:
+        ``humanness_rewrite_with_profile`` → existing ``humanness_rewrite``
+        → original text unchanged.
+    """
+    if not text or not text.strip():
+        return None
+
+    binary = patina_bin or os.environ.get("DGMH_PATINA_BIN", _DEFAULT_PATINA_BIN)
+    if not Path(binary).exists():
+        logger.warning(
+            "humanness_rewrite_with_profile: patina binary missing at %s", binary
+        )
+        return None
+
+    args = [
+        "node",
+        binary,
+        "--lang",
+        lang,
+        "--profile",
+        profile,
+        "--backend",
+        backend,
+    ]
+
+    try:
+        result = subprocess.run(
+            args,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            encoding="utf-8",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "humanness_rewrite_with_profile: patina invocation failed: %s", exc
+        )
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "humanness_rewrite_with_profile: patina exited %d; stderr=%s",
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
+        return None
+
+    out = (result.stdout or "").strip()
+    if not out or len(out) < 5:
+        return None
+    return out
+
+
 def composite_reward(
     *,
     human_likeness: float,

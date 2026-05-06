@@ -10,11 +10,14 @@ import os
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
 from dgmh.patina_judge import (
     PatinaScore,
     PatinaScoreError,
     _parse_score_output,
     composite_reward,
+    humanness_rewrite_with_profile,
     score_humanness,
 )
 
@@ -155,6 +158,110 @@ class TestScoreHumannessLive(unittest.TestCase):
         result = score_humanness(text)
         self.assertGreater(result.ai_score, 0.0)
         self.assertIn("communication", result.sub_scores)
+
+
+class TestHumannessRewriteWithProfile(unittest.TestCase):
+    """Step P1 (v3) — programmatic ``patina --profile <profile> --backend <backend>``.
+
+    Validates the new public-channel rewrite surface. The existing
+    :func:`humanness_rewrite` is intentionally untouched (see Step P1 plan
+    note: 1:1 path stays on the old function, public path uses the new).
+    """
+
+    def test_empty_text_returns_none(self) -> None:
+        self.assertIsNone(humanness_rewrite_with_profile(""))
+        self.assertIsNone(humanness_rewrite_with_profile("   \n  "))
+
+    def test_missing_binary_returns_none(self) -> None:
+        result = humanness_rewrite_with_profile(
+            "테스트 텍스트", patina_bin="/nonexistent/patina.js"
+        )
+        self.assertIsNone(result)
+
+    def test_subprocess_success_returns_stdout(self) -> None:
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "응 그쪽이지.\n"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ) as run_mock, mock.patch(
+            "dgmh.patina_judge.Path.exists", return_value=True
+        ):
+            out = humanness_rewrite_with_profile(
+                "원본 ChatGPT 어조 텍스트", patina_bin="/fake/patina.js"
+            )
+        self.assertEqual(out, "응 그쪽이지.")
+
+        args = run_mock.call_args[0][0]
+        # Sanity: invocation includes --profile social --backend codex-cli
+        # (operator-verified flags, see plan v3 Step P1).
+        self.assertIn("--profile", args)
+        self.assertEqual(args[args.index("--profile") + 1], "social")
+        self.assertIn("--backend", args)
+        self.assertEqual(args[args.index("--backend") + 1], "codex-cli")
+        self.assertIn("--lang", args)
+        self.assertEqual(args[args.index("--lang") + 1], "ko")
+
+    def test_subprocess_nonzero_exit_returns_none(self) -> None:
+        completed = mock.Mock()
+        completed.returncode = 2
+        completed.stdout = ""
+        completed.stderr = "patina: backend codex-cli unauthenticated"
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            self.assertIsNone(
+                humanness_rewrite_with_profile(
+                    "원본 텍스트", patina_bin="/fake/patina.js"
+                )
+            )
+
+    def test_subprocess_timeout_returns_none(self) -> None:
+        import subprocess as _sp
+
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run",
+            side_effect=_sp.TimeoutExpired(cmd=["node"], timeout=30),
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            self.assertIsNone(
+                humanness_rewrite_with_profile(
+                    "원본 텍스트", patina_bin="/fake/patina.js"
+                )
+            )
+
+    def test_short_stdout_returns_none(self) -> None:
+        """An empty / one-character stdout is treated as a non-result."""
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "ㅇ"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            self.assertIsNone(
+                humanness_rewrite_with_profile(
+                    "원본 텍스트", patina_bin="/fake/patina.js"
+                )
+            )
+
+    def test_passes_text_via_stdin(self) -> None:
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "rewritten"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ) as run_mock, mock.patch(
+            "dgmh.patina_judge.Path.exists", return_value=True
+        ):
+            humanness_rewrite_with_profile(
+                "원본 입력 텍스트", patina_bin="/fake/patina.js"
+            )
+        # subprocess.run was called with input= containing the source.
+        call_kwargs = run_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["input"], "원본 입력 텍스트")
+        self.assertTrue(call_kwargs.get("text", False))
 
 
 if __name__ == "__main__":
