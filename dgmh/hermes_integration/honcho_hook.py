@@ -16,6 +16,7 @@ unchanged. Honcho is an additional persistent memory layer on top.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import threading
@@ -100,8 +101,20 @@ def _wrap_send(adapter: Any) -> None:
             if not _is_relevant_channel(str(chat_id)):
                 return result
             thread_id = (metadata or {}).get("thread_id")
+            # Step 6 (v3): capture a Context snapshot with the resolved
+            # channel kind so the background mirror thread tags the Honcho
+            # write correctly. ``contextvars.copy_context()`` is REQUIRED —
+            # bare ``threading.Thread`` does NOT propagate ContextVar values
+            # and the worker would silently see the default ("operator").
+            from dgmh.honcho_client import (
+                capture_context_with_kind,
+                channel_kind_for,
+            )
+
+            ctx = capture_context_with_kind(channel_kind_for(str(chat_id)))
             t = threading.Thread(
-                target=_add_bot_async,
+                target=ctx.run,
+                args=(_add_bot_async,),
                 kwargs={
                     "channel_id": str(chat_id),
                     "thread_id": str(thread_id) if thread_id else None,
@@ -219,8 +232,18 @@ def _wrap_on_message(adapter: Any) -> None:
                 thread_id = channel_id
                 channel_id = str(parent.id)
 
+            # Step 6 (v3): same copy_context pattern as the bot mirror —
+            # capture the channel kind from the resolved channel_id and
+            # carry it into the worker thread.
+            from dgmh.honcho_client import (
+                capture_context_with_kind,
+                channel_kind_for,
+            )
+
+            ctx = capture_context_with_kind(channel_kind_for(channel_id))
             t = threading.Thread(
-                target=_add_user_async,
+                target=ctx.run,
+                args=(_add_user_async,),
                 kwargs={
                     "channel_id": channel_id,
                     "thread_id": thread_id,

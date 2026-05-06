@@ -362,8 +362,19 @@ def _wrap_send(adapter: Any) -> None:
                 result.get("message_id") if isinstance(result, dict) else None
             )
 
+            # Step 6 (v3): capture context with the resolved channel kind so
+            # _score_in_thread sees the right channel_kind ContextVar (used
+            # transitively by any honcho-client read it triggers, e.g. via
+            # the structural pre-prune path).
+            from dgmh.honcho_client import (
+                capture_context_with_kind,
+                channel_kind_for,
+            )
+
+            ctx = capture_context_with_kind(channel_kind_for(str(chat_id)))
             thread = threading.Thread(
-                target=_score_in_thread,
+                target=ctx.run,
+                args=(_score_in_thread,),
                 kwargs={
                     "content": content,
                     "chat_id": str(chat_id),

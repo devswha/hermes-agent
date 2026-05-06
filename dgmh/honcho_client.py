@@ -23,6 +23,7 @@ so a Honcho outage never blocks the gateway response path.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 from dataclasses import dataclass
@@ -36,6 +37,96 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 _DEFAULT_WORKSPACE = "dgmh-flask"
 _DEFAULT_OPERATOR_PEER = "devswha"
 _DEFAULT_BOT_PEER = "flask"
+
+
+# Step 6 (v3): channel-kind ContextVar.
+#
+# Tags every Honcho write with the kind of channel the message originated
+# from. Reads default to ``"operator"`` so legacy 1:1 paths that don't set
+# the var are preserved byte-for-byte (the canonical session_id_for_channel
+# / get_cached_operator_snapshot behavior is unchanged when kind=operator).
+#
+# Public-channel hooks call ``set_channel_kind("public")`` before any write
+# triggered by the message. Background scoring/mirroring threads MUST use
+# ``contextvars.copy_context()`` at dispatch time — bare ``threading.Thread``
+# does NOT propagate ContextVar values, so the worker would silently see
+# the default and tag everything as "operator".
+_channel_kind: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "dgmh_channel_kind", default="operator"
+)
+
+
+_VALID_CHANNEL_KINDS = ("operator", "public")
+
+
+def set_channel_kind(kind: str) -> contextvars.Token:
+    """Set the active channel kind for the current logical context.
+
+    Returns the ``Token`` so callers can ``reset()`` to the previous value
+    (e.g. when a single dispatcher routes both operator and public events).
+    Unknown kinds are coerced to ``"operator"`` with a warning so a typo
+    can't quietly mis-tag operator memory as public.
+    """
+    if kind not in _VALID_CHANNEL_KINDS:
+        logger.warning(
+            "set_channel_kind: unknown kind=%r; coercing to 'operator'", kind
+        )
+        kind = "operator"
+    return _channel_kind.set(kind)
+
+
+def get_channel_kind() -> str:
+    """Read the active channel kind from the current logical context."""
+    return _channel_kind.get()
+
+
+def is_public_channel(channel_id: str) -> bool:
+    """Return True if ``channel_id`` is configured as a public channel.
+
+    Reads the comma-separated env var ``DGMH_PUBLIC_CHANNELS``. Default
+    (unset) means no channel is public — backward-compatible with the 1:1
+    install where everything is operator-trust. The operator's 1:1
+    channel id should never appear in this list.
+    """
+    raw = os.environ.get("DGMH_PUBLIC_CHANNELS", "")
+    if not raw:
+        return False
+    public_ids = {ch.strip() for ch in raw.split(",") if ch.strip()}
+    return str(channel_id) in public_ids
+
+
+def channel_kind_for(channel_id: str) -> str:
+    """Resolve the channel-kind for a Discord channel id."""
+    return "public" if is_public_channel(channel_id) else "operator"
+
+
+def capture_context_with_kind(kind: str) -> contextvars.Context:
+    """Return a captured Context snapshot with ``_channel_kind`` set to ``kind``.
+
+    Use this at the dispatch site for ``threading.Thread`` so the background
+    worker reads the right channel kind:
+
+        ctx = capture_context_with_kind("public")
+        threading.Thread(
+            target=ctx.run,
+            args=(some_callable,),
+            kwargs={...},
+        ).start()
+
+    The caller's own ContextVar state is NOT modified — only the captured
+    snapshot carries the value into the thread.
+    """
+    if kind not in _VALID_CHANNEL_KINDS:
+        logger.warning(
+            "capture_context_with_kind: unknown kind=%r; coercing to 'operator'",
+            kind,
+        )
+        kind = "operator"
+    ctx = contextvars.copy_context()
+    # ctx.run mutates ``ctx`` in-place without touching the caller's
+    # ambient context; the captured snapshot now has channel_kind=kind.
+    ctx.run(_channel_kind.set, kind)
+    return ctx
 
 
 @dataclass(frozen=True)
@@ -89,16 +180,54 @@ def get_client():
         return None
 
 
-def session_id_for_channel(channel_id: str, thread_id: Optional[str] = None) -> str:
-    """Stable session key per Discord chat surface.
+def session_id_for_channel(
+    channel_id: str,
+    thread_id: Optional[str] = None,
+    *,
+    kind: Optional[str] = None,
+) -> str:
+    """Stable session key per Discord chat surface, namespaced by channel kind.
 
     Threads get their own session — they are independent conversational
     contexts. Channel-only messages share the channel session.
+
+    The ``kind`` argument (defaulting to the active ``_channel_kind``
+    ContextVar) namespaces public-channel writes into a separate session
+    so ``get_cached_operator_snapshot`` never queries public-tagged history
+    (Step 6, AC12). When ``kind`` is ``"operator"`` the legacy session id
+    ``discord-<channel>[-thread-<id>]`` is returned unchanged so existing
+    1:1 sessions keep their identity.
     """
-    base = f"discord-{channel_id}"
+    if kind is None:
+        kind = _channel_kind.get()
+
+    if kind == "operator":
+        base = f"discord-{channel_id}"
+    else:
+        # All non-operator kinds get their own namespace; "public" today,
+        # potentially more later (e.g., "broadcast"). Tagging in the
+        # session id keeps message history physically separated, which is
+        # the simplest way to satisfy AC12 with any Honcho backend.
+        base = f"discord-{kind}-{channel_id}"
     if thread_id:
         return f"{base}-thread-{thread_id}"
     return base
+
+
+def _build_message(peer: object, content: str, *, kind: str) -> object:
+    """Return a Honcho message object, attaching ``channel_kind`` metadata
+    when the SDK supports it.
+
+    Older SDK builds expose a bare ``peer.message(content)``; newer ones
+    accept a ``metadata=`` kwarg. Try the kwarg path first and fall back
+    silently — metadata tagging is a defense-in-depth signal on top of
+    session-id namespacing, not the sole isolation mechanism.
+    """
+    try:
+        return peer.message(content, metadata={"channel_kind": kind})  # type: ignore[attr-defined]
+    except TypeError:
+        # SDK doesn't accept metadata kwarg; session-id namespacing is enough.
+        return peer.message(content)  # type: ignore[attr-defined]
 
 
 def add_user_message(
@@ -106,18 +235,29 @@ def add_user_message(
     channel_id: str,
     thread_id: Optional[str],
     content: str,
+    kind: Optional[str] = None,
 ) -> bool:
-    """Persist an inbound (operator) message to Honcho. Returns True on success."""
+    """Persist an inbound (operator) message to Honcho. Returns True on success.
+
+    The active ``_channel_kind`` ContextVar (or an explicit ``kind`` kwarg)
+    determines which session namespace this write lands in. Background
+    threads MUST use ``contextvars.copy_context()`` at dispatch time so the
+    var carries through; bare ``threading.Thread`` resets it to default.
+    """
     if _is_disabled():
         return False
     client = get_client()
     if client is None:
         return False
+    if kind is None:
+        kind = _channel_kind.get()
     cfg = HonchoConfig.from_env()
     try:
         operator = client.peer(cfg.operator_peer)
-        session = client.session(session_id_for_channel(channel_id, thread_id))
-        session.add_messages([operator.message(content)])
+        session = client.session(
+            session_id_for_channel(channel_id, thread_id, kind=kind)
+        )
+        session.add_messages([_build_message(operator, content, kind=kind)])
         return True
     except Exception:
         logger.exception("honcho add_user_message failed")
@@ -129,6 +269,7 @@ def add_bot_message(
     channel_id: str,
     thread_id: Optional[str],
     content: str,
+    kind: Optional[str] = None,
 ) -> bool:
     """Persist an outbound (bot) message to Honcho. Returns True on success."""
     if _is_disabled():
@@ -136,11 +277,15 @@ def add_bot_message(
     client = get_client()
     if client is None:
         return False
+    if kind is None:
+        kind = _channel_kind.get()
     cfg = HonchoConfig.from_env()
     try:
         bot = client.peer(cfg.bot_peer)
-        session = client.session(session_id_for_channel(channel_id, thread_id))
-        session.add_messages([bot.message(content)])
+        session = client.session(
+            session_id_for_channel(channel_id, thread_id, kind=kind)
+        )
+        session.add_messages([_build_message(bot, content, kind=kind)])
         return True
     except Exception:
         logger.exception("honcho add_bot_message failed")
@@ -225,6 +370,12 @@ def _is_high_quality_snapshot(text: str) -> bool:
 def get_cached_operator_snapshot(query: str | None = None) -> str:
     """Return a short, cached, quality-gated description of the operator.
 
+    Step 6 (v3): this function is the operator-channel snapshot. It
+    explicitly forces ``kind="operator"`` so the underlying chat path is
+    not contaminated by ``_channel_kind`` being accidentally set to
+    ``"public"`` in the calling context. The complementary public-channel
+    snapshot lives in :func:`get_cached_persona_snapshot`.
+
     Empty string is returned when:
       - Honcho is disabled / unreachable
       - the snapshot fails the quality gate (too short, too English,
@@ -236,7 +387,7 @@ def get_cached_operator_snapshot(query: str | None = None) -> str:
     if _is_disabled():
         return ""
 
-    key = (query or "default").strip()[:120]
+    key = ("operator::" + (query or "default")).strip()[:140]
     now = time.monotonic()
     cached = _REP_CACHE.get(key)
     if cached and (now - cached[0]) < _REP_CACHE_TTL_S:
@@ -250,7 +401,52 @@ def get_cached_operator_snapshot(query: str | None = None) -> str:
         "단, 충분한 근거가 없으면 그냥 '근거 없음' 한 단어만 답해. "
         "추측하지 말 것."
     )
-    raw = chat_about_operator(q).strip()
+    # Force operator-channel context for this query so ``chat_about_operator``
+    # never accidentally inherits a ``public`` ContextVar set on the caller.
+    token = _channel_kind.set("operator")
+    try:
+        raw = chat_about_operator(q).strip()
+    finally:
+        _channel_kind.reset(token)
+
+    if not _is_high_quality_snapshot(raw):
+        _REP_CACHE[key] = (now, "")
+        return ""
+
+    if len(raw) > 600:
+        raw = raw[:600]
+    _REP_CACHE[key] = (now, raw)
+    return raw
+
+
+def get_cached_persona_snapshot(query: str | None = None) -> str:
+    """Return a short, cached snapshot for the public-channel persona surface.
+
+    Mirrors :func:`get_cached_operator_snapshot` but namespaced under
+    ``kind="public"`` so operator-private memory never leaks into public
+    replies (Step 6 / AC12). Empty string on any failure or low-quality
+    snapshot.
+    """
+    import time
+
+    if _is_disabled():
+        return ""
+
+    key = ("public::" + (query or "default")).strip()[:140]
+    now = time.monotonic()
+    cached = _REP_CACHE.get(key)
+    if cached and (now - cached[0]) < _REP_CACHE_TTL_S:
+        return cached[1]
+
+    q = query or (
+        "한국어로만 답해. 공개 채널에서 flask 라는 캐릭터로 응대할 때 어떤 톤이 자연스러운지 "
+        "1-2문장만 적어. 충분한 근거가 없으면 '근거 없음' 한 단어만 답해."
+    )
+    token = _channel_kind.set("public")
+    try:
+        raw = chat_about_operator(q).strip()
+    finally:
+        _channel_kind.reset(token)
 
     if not _is_high_quality_snapshot(raw):
         _REP_CACHE[key] = (now, "")
