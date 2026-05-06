@@ -14,6 +14,24 @@ The modifier is incentivized to produce mutations that pass downstream. You are 
 
 You are NOT scoring the skill on any task set. You are scoring **the proposed mutation as a mutation** — does it represent a defensible improvement step in the search?
 
+## SOUL.md persona invariants
+
+When the candidate is a `SOUL.md` mutation, two embedded marker blocks
+carry hard constraints that the modifier must respect. Reject the
+candidate if:
+
+- The candidate's `<!-- PERSONA-IDENTITY-START -->` …
+  `<!-- PERSONA-IDENTITY-END -->` block has been modified relative to
+  the parent. The IDENTITY block is invariant — any diff is a hard
+  reject.
+- The candidate has zero or more than one IDENTITY-START / END marker
+  pair (structurally damaged persona).
+- A `<!-- PERSONA-VOICE-START -->` … `<!-- PERSONA-VOICE-END -->` block
+  contains a `target: NN%` line where `N < 55` or `N > 85`. Voice
+  tuning numbers must stay inside `[55, 85]`.
+
+These checks fire regardless of the verdict criteria below.
+
 ## Verdict criteria
 
 Output `verdict: "reject"` if any of:

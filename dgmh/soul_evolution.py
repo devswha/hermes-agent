@@ -618,6 +618,41 @@ def run_soul_evolution(opts: SoulEvolutionOpts) -> bool:
 
     # Step 5a: Accept
     if critic_approved and child_content:
+        # Step 7 (v3) — two-tier persona pinning. Even an approved candidate
+        # must satisfy the IDENTITY hard-pin and VOICE soft-pin invariants.
+        # Failure modes:
+        #   - 0 or 2+ IDENTITY markers → reject candidate (PersonaPinError).
+        #   - IDENTITY block diff      → force-replace with parent's block,
+        #                                drift logged.
+        #   - VOICE target NN% out of [55, 85] → clamp + log.
+        try:
+            from dgmh.persona_pinning import (
+                PersonaPinError,
+                enforce_persona_invariants,
+            )
+
+            revised_child, drift_events = enforce_persona_invariants(
+                parent_content,
+                child_content,
+                parent_hash=parent_hash,
+                child_hash=child_hash,
+            )
+            if revised_child != child_content:
+                logger.info(
+                    "soul_evolution: persona pinning revised candidate "
+                    "(events=%d)",
+                    len(drift_events),
+                )
+                child_content = revised_child
+                child_hash = _sha256(child_content)
+        except PersonaPinError as exc:
+            rejection_reason = f"persona-pin-reject: {exc}"
+            logger.warning(
+                "soul_evolution: persona invariant rejected candidate: %s", exc
+            )
+            critic_approved = False
+
+    if critic_approved and child_content:
         try:
             # Archive the prior SOUL.md version
             _archive_prior_soul(
