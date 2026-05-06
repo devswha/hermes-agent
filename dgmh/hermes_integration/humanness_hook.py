@@ -18,8 +18,10 @@ import asyncio
 import hashlib
 import logging
 import os
+import random
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -256,6 +258,110 @@ def _prune_polluting_message(
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Step 2 (v3): bimodal humanlike latency with operator shortcut
+# ---------------------------------------------------------------------------
+#
+# Real humans don't respond in 200ms. They take longer when the channel is
+# warm (recent activity) and longer still when the channel is cold (no
+# activity for ages). The bot's instant reply is one of the strongest tells
+# in public chat. Bimodal latency closes that gap.
+#
+# Buckets (gated by DGMH_PUBLIC_HUMAN_MODE=1 AND public channel):
+#   active (last_msg < 30s)   → max(3, min(20,  gauss(8,   4)))
+#   warm   (last_msg < 600s)  → max(10, min(120, gauss(35,  20)))
+#   cold   (otherwise)        → max(60, min(900, gauss(180, 90)))
+#
+# AC1.1: when the bot is replying TO the operator (author is operator),
+# the operator-shortcut bucket fires regardless of activity state:
+#   operator → max(3, min(15, gauss(8, 4)))
+# This keeps urgent operator pings from waiting up to 15 minutes mid-night.
+#
+# Operator user-id default: 266436073557590016. Override via
+# DGMH_OPERATOR_USER_ID. The wrapped_send call site resolves is_operator
+# from metadata["author_id"] when available, falling back to that env id.
+
+_DEFAULT_OPERATOR_USER_ID = "266436073557590016"
+
+# In-memory map: channel_id -> last bot-send unix timestamp. Keeps Step 2's
+# bucket lookup honest about when this surface last had bot activity.
+_LAST_BOT_SEND_TS: dict[str, float] = {}
+
+
+def _operator_user_ids() -> set[str]:
+    raw = os.environ.get("DGMH_OPERATOR_USER_ID", _DEFAULT_OPERATOR_USER_ID)
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _resolve_is_operator(
+    metadata: Optional[dict[str, Any]],
+    *,
+    author_id: Optional[str] = None,
+) -> bool:
+    """Best-effort check of whether the inbound author is the operator.
+
+    Reads ``metadata["author_id"]`` first (Hermes adapter passes it through
+    when available), then falls back to an explicit ``author_id`` arg.
+    Returns False on any unexpected shape so a missing/garbled metadata
+    blob just demotes the call to the regular bimodal path.
+    """
+    candidate: Optional[str] = author_id
+    if candidate is None and isinstance(metadata, dict):
+        candidate = metadata.get("author_id") or metadata.get("user_id")
+    if candidate is None:
+        return False
+    try:
+        return str(candidate) in _operator_user_ids()
+    except Exception:
+        return False
+
+
+def _seconds_since_last_msg(channel_id: str, *, now: Optional[float] = None) -> float:
+    """Seconds since this surface last saw a bot send.
+
+    Returns a large sentinel (1e9) when no prior send is recorded so a
+    cold-start surface lands in the cold bucket.
+    """
+    last = _LAST_BOT_SEND_TS.get(str(channel_id))
+    if last is None:
+        return 1e9
+    return max(0.0, (now if now is not None else time.time()) - last)
+
+
+def _record_bot_send(channel_id: str, *, ts: Optional[float] = None) -> None:
+    _LAST_BOT_SEND_TS[str(channel_id)] = ts if ts is not None else time.time()
+
+
+def _human_latency_seconds(
+    channel_id: str,
+    *,
+    is_operator: bool,
+    rng: Optional[random.Random] = None,
+    now: Optional[float] = None,
+) -> float:
+    """Sample a humanlike pre-send sleep in seconds for ``channel_id``.
+
+    See module-level docstring for bucket definitions. ``rng`` is exposed
+    so unit tests can pin the distribution; production callers pass None
+    and use the module-default RNG.
+    """
+    rng_ = rng or random
+    if is_operator:
+        return max(3.0, min(15.0, rng_.gauss(8.0, 4.0)))
+    last_ago = _seconds_since_last_msg(str(channel_id), now=now)
+    if last_ago < 30.0:
+        return max(3.0, min(20.0, rng_.gauss(8.0, 4.0)))
+    if last_ago < 600.0:
+        return max(10.0, min(120.0, rng_.gauss(35.0, 20.0)))
+    return max(60.0, min(900.0, rng_.gauss(180.0, 90.0)))
+
+
+def _public_human_mode_enabled() -> bool:
+    """Whether DGMH_PUBLIC_HUMAN_MODE is set to a truthy value."""
+    val = os.environ.get("DGMH_PUBLIC_HUMAN_MODE", "")
+    return val not in ("", "0", "false", "False")
+
+
 def _score_in_thread(
     *,
     content: str,
@@ -396,7 +502,37 @@ def _wrap_send(adapter: Any) -> None:
                         "[humanness_hook] pre-send rewrite failed; using original"
                     )
 
+        # Step 2 (v3): bimodal humanlike pre-send sleep for public channels.
+        # Gated by DGMH_PUBLIC_HUMAN_MODE=1 AND public channel — with the
+        # env unset (default), behavior is byte-identical to the prior
+        # adapter.send pipeline so the 1:1 verifier baseline holds.
+        try:
+            if _public_human_mode_enabled():
+                from dgmh.honcho_client import is_public_channel
+
+                if is_public_channel(str(chat_id)):
+                    is_op = _resolve_is_operator(metadata)
+                    sleep_s = _human_latency_seconds(
+                        str(chat_id), is_operator=is_op
+                    )
+                    logger.info(
+                        "[humanness_hook] bimodal sleep %.2fs for chat=%s is_op=%s",
+                        sleep_s, chat_id, is_op,
+                    )
+                    await asyncio.sleep(sleep_s)
+        except Exception:
+            logger.exception(
+                "[humanness_hook] bimodal latency failed; sending without sleep"
+            )
+
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
+
+        # Step 2 (v3): record this send timestamp so the next reply on
+        # this channel sees the up-to-date last-message-ago bucket.
+        try:
+            _record_bot_send(str(chat_id))
+        except Exception:
+            pass
 
         try:
             if not _should_score(content):
