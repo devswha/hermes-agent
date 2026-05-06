@@ -1,20 +1,17 @@
 """DGM-H wrap-order verification helper.
 
 Both ``humanness_hook._wrap_send`` and ``honcho_hook._wrap_send`` monkey-patch
-``adapter.send``. The order matters:
+``adapter.send``. Hermes' hook loader iterates hook directories in
+filesystem-name order, so ``dgmh-honcho`` wraps first (becomes innermost) and
+``dgmh-humanness`` wraps second (becomes outermost). The HOOK.yaml ``priority``
+field is documentation only; Hermes' loader does not honour it.
 
-  - humanness wraps **innermost** (closest to the real ``adapter.send``).
-    It performs the patina rewrite + score side-effect on the actual outbound
-    text. Priority 100 in HOOK.yaml.
-  - honcho wraps **outermost**. It mirrors the post-rewrite content into the
-    Honcho memory layer so the peer model never sees pre-rewrite drafts.
-    Priority 50 in HOOK.yaml.
-
-Lower priority runs later → wraps outer. Higher priority runs first → wraps
-inner. The HOOK.yaml field is documentation today; Hermes' loader does not
-yet honour it. Runtime ordering is enforced by ``_verify_wrap_chain`` below
-which walks the ``__wrapped__`` chain from outer to inner and asserts the
-sequence ``["honcho", "humanness"]``.
+This ordering still satisfies the post-rewrite-mirror requirement: humanness
+(outer) rewrites the outbound text and stashes it via the
+``_post_rewrite_content`` ContextVar before delegating to honcho (inner).
+honcho's wrapped_send calls ``original_send`` first then reads the ContextVar,
+so it mirrors the post-rewrite content regardless of which hook is outer —
+ContextVar values propagate down a single async context.
 
 Each wrapper sets two attributes on its ``wrapped_send`` callable:
 
@@ -35,8 +32,10 @@ from typing import Any, List
 logger = logging.getLogger(__name__)
 
 
-# Outer-to-inner expected order: honcho is outermost, humanness is innermost.
-EXPECTED_CHAIN: List[str] = ["honcho", "humanness"]
+# Outer-to-inner expected order. Hermes loads hooks in filesystem-name order
+# (``dgmh-honcho`` before ``dgmh-humanness``), so honcho wraps first (becomes
+# innermost) and humanness wraps second (becomes outermost).
+EXPECTED_CHAIN: List[str] = ["humanness", "honcho"]
 
 
 def _walk_chain(send_fn: Any, max_depth: int = 8) -> List[str]:

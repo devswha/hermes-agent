@@ -2,12 +2,16 @@
 
 Both ``dgmh.hermes_integration.humanness_hook._wrap_send`` and
 ``dgmh.hermes_integration.honcho_hook._wrap_send`` monkey-patch ``adapter.send``.
-The pipeline contract is:
+Hermes' hook loader iterates hook directories in filesystem-name order, so
+``dgmh-honcho`` wraps first (becomes innermost) and ``dgmh-humanness`` wraps
+second (becomes outermost):
 
-    outermost  →  honcho  →  humanness  →  original_send  (innermost)
+    outermost  →  humanness  →  honcho  →  original_send  (innermost)
 
-Honcho must be outermost so its peer-memory mirror sees the post-rewrite
-content humanness produces.
+Honcho still mirrors the post-rewrite content because ContextVar values
+propagate down a single async context: humanness (outer) sets
+``_post_rewrite_content`` before delegating to honcho (inner), and honcho's
+wrapped_send reads the var after calling its own original_send.
 
 These tests install both wrappers on a stub adapter and walk the
 ``__wrapped__`` chain via ``dgmh.hermes_integration.wrap_order.verify_wrap_chain``.
@@ -43,37 +47,41 @@ class _StubAdapter:
 
 
 class TestWrapChain(unittest.TestCase):
-    def test_humanness_then_honcho_chain_outer_inner(self) -> None:
-        """Wrapping humanness first then honcho must yield ``[honcho, humanness]``."""
+    def test_honcho_then_humanness_chain_outer_inner(self) -> None:
+        """Wrapping honcho first then humanness must yield ``[humanness, honcho]``.
+
+        This mirrors hermes' actual hook load order (filesystem-name sort:
+        ``dgmh-honcho`` < ``dgmh-humanness``).
+        """
         adapter = _StubAdapter()
-        humanness_hook._wrap_send(adapter)
         honcho_hook._wrap_send(adapter)
+        humanness_hook._wrap_send(adapter)
 
         seen = _walk_chain(adapter.send)
         self.assertEqual(seen, EXPECTED_CHAIN)
         self.assertTrue(verify_wrap_chain(adapter))
 
-    def test_humanness_marker_innermost(self) -> None:
-        """Innermost wrapper must carry __dgmh_hook_name__ == 'humanness'."""
+    def test_honcho_marker_innermost(self) -> None:
+        """Innermost wrapper must carry __dgmh_hook_name__ == 'honcho'."""
         adapter = _StubAdapter()
-        humanness_hook._wrap_send(adapter)
-        self.assertEqual(
-            getattr(adapter.send, "__dgmh_hook_name__", None), "humanness"
-        )
-        # The original send is NOT a dgmh wrapper, so chain length is 1.
-        self.assertEqual(_walk_chain(adapter.send), ["humanness"])
-
-    def test_honcho_marker_outermost(self) -> None:
-        """Outer wrapper carries 'honcho' and exposes humanness via __wrapped__."""
-        adapter = _StubAdapter()
-        humanness_hook._wrap_send(adapter)
         honcho_hook._wrap_send(adapter)
         self.assertEqual(
             getattr(adapter.send, "__dgmh_hook_name__", None), "honcho"
         )
+        # The original send is NOT a dgmh wrapper, so chain length is 1.
+        self.assertEqual(_walk_chain(adapter.send), ["honcho"])
+
+    def test_humanness_marker_outermost(self) -> None:
+        """Outer wrapper carries 'humanness' and exposes honcho via __wrapped__."""
+        adapter = _StubAdapter()
+        honcho_hook._wrap_send(adapter)
+        humanness_hook._wrap_send(adapter)
+        self.assertEqual(
+            getattr(adapter.send, "__dgmh_hook_name__", None), "humanness"
+        )
         inner = getattr(adapter.send, "__wrapped__", None)
         self.assertIsNotNone(inner)
-        self.assertEqual(getattr(inner, "__dgmh_hook_name__", None), "humanness")
+        self.assertEqual(getattr(inner, "__dgmh_hook_name__", None), "honcho")
 
     def test_unwrapped_adapter_chain_empty(self) -> None:
         """A bare adapter has no dgmh markers; verification returns False."""
@@ -81,22 +89,22 @@ class TestWrapChain(unittest.TestCase):
         self.assertEqual(_walk_chain(adapter.send), [])
         self.assertFalse(verify_wrap_chain(adapter))
 
-    def test_partial_chain_humanness_only(self) -> None:
-        """Only humanness wrapped → partial chain, verify returns False."""
+    def test_partial_chain_honcho_only(self) -> None:
+        """Only honcho wrapped → partial chain, verify returns False."""
         adapter = _StubAdapter()
-        humanness_hook._wrap_send(adapter)
-        self.assertEqual(_walk_chain(adapter.send), ["humanness"])
-        # Partial: missing honcho on the outside.
+        honcho_hook._wrap_send(adapter)
+        self.assertEqual(_walk_chain(adapter.send), ["honcho"])
+        # Partial: missing humanness on the outside.
         self.assertFalse(verify_wrap_chain(adapter))
 
     def test_reversed_order_detected_as_broken(self) -> None:
-        """If honcho wraps before humanness, the chain is ``[humanness, honcho]``
+        """If humanness wraps before honcho, the chain is ``[honcho, humanness]``
         which is the wrong order — verify must return False and log ERROR."""
         adapter = _StubAdapter()
-        honcho_hook._wrap_send(adapter)
         humanness_hook._wrap_send(adapter)
+        honcho_hook._wrap_send(adapter)
         seen = _walk_chain(adapter.send)
-        self.assertEqual(seen, ["humanness", "honcho"])
+        self.assertEqual(seen, ["honcho", "humanness"])
         self.assertNotEqual(seen, EXPECTED_CHAIN)
         self.assertFalse(verify_wrap_chain(adapter))
 
