@@ -265,9 +265,8 @@ class TestHumannessRewriteWithProfile(unittest.TestCase):
 
     def test_strips_patina_analyst_preamble(self) -> None:
         """Regression: patina prepends an analyst preamble paragraph
-        (e.g. "아직 AI 티 나는 부분: ...") before the actual rewrite. We
-        must return ONLY the final paragraph block — the rewritten body —
-        not the preamble. See Fix 1 in plan v3 hot-patch.
+        (e.g. "아직 AI 티 나는 부분: ...") before the actual rewrite. The
+        preamble is dropped; only the body is returned.
         """
         preamble = (
             "아직 AI 티 나는 부분: 딱히 없음. 다만 첫 문장의 호흡이 "
@@ -287,6 +286,46 @@ class TestHumannessRewriteWithProfile(unittest.TestCase):
         self.assertEqual(out, body)
         self.assertNotIn("AI 티", out or "")
         self.assertNotIn("다만", out or "")
+
+    def test_preserves_multi_paragraph_rewrite_body(self) -> None:
+        """No preamble: all paragraph blocks must survive joined by blank lines."""
+        body = (
+            "그건 좋은 아이디어야.\n\n"
+            "다만 자세한 건 생각해봐야 해.\n\n"
+            "응, 한번 해보자."
+        )
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = body + "\n"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            out = humanness_rewrite_with_profile(
+                "원본 텍스트", patina_bin="/fake/patina.js"
+            )
+        self.assertIn("그건 좋은 아이디어야.", out or "")
+        self.assertIn("다만 자세한 건 생각해봐야 해.", out or "")
+        self.assertIn("응, 한번 해보자.", out or "")
+
+    def test_preamble_then_multi_paragraph_body(self) -> None:
+        """Preamble dropped; both subsequent body paragraphs preserved."""
+        preamble = "아직 AI 티 나는 부분: 없음."
+        body_p1 = "현재 버전은 0.9.2야."
+        body_p2 = "업데이트는 다음 주에 나올 것 같아."
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = f"{preamble}\n\n{body_p1}\n\n{body_p2}\n"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            out = humanness_rewrite_with_profile(
+                "원본 텍스트", patina_bin="/fake/patina.js"
+            )
+        self.assertNotIn("AI 티", out or "")
+        self.assertIn(body_p1, out or "")
+        self.assertIn(body_p2, out or "")
 
 
 if __name__ == "__main__":

@@ -394,12 +394,19 @@ def humanness_rewrite_with_profile(
     if not out:
         return None
     # Patina prepends an analyst preamble paragraph (e.g.
-    # "아직 AI 티 나는 부분: ...") before the actual rewrite. The rewritten
-    # body is the final paragraph block — split on blank lines and keep
-    # only the last block. This is robust to preamble template changes
-    # and matches the 1-2 sentence chat cap.
+    # "아직 AI 티 나는 부분: ...") before the actual rewrite. Drop ONLY the
+    # first block if it matches the preamble heuristic; join the rest so
+    # legitimate multi-paragraph rewrites are preserved intact.
     blocks = re.split(r"\n\s*\n", out)
-    out = blocks[-1].strip() if blocks else out
+    if blocks:
+        first = blocks[0].strip()
+        is_preamble = bool(
+            re.match(r"^(아직|남은)\s*AI\s*티", first)
+            or re.search(r"AI\s*티", first[:60])
+        )
+        if is_preamble and len(blocks) > 1:
+            blocks = blocks[1:]
+    out = "\n\n".join(b.strip() for b in blocks if b.strip())
     if not out or len(out) < 5:
         return None
     return out
