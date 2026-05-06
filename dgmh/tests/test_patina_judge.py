@@ -263,6 +263,31 @@ class TestHumannessRewriteWithProfile(unittest.TestCase):
         self.assertEqual(call_kwargs["input"], "원본 입력 텍스트")
         self.assertTrue(call_kwargs.get("text", False))
 
+    def test_strips_patina_analyst_preamble(self) -> None:
+        """Regression: patina prepends an analyst preamble paragraph
+        (e.g. "아직 AI 티 나는 부분: ...") before the actual rewrite. We
+        must return ONLY the final paragraph block — the rewritten body —
+        not the preamble. See Fix 1 in plan v3 hot-patch.
+        """
+        preamble = (
+            "아직 AI 티 나는 부분: 딱히 없음. 다만 첫 문장의 호흡이 "
+            "조금 길어 보일 수 있음."
+        )
+        body = "응 그쪽이지."
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = f"{preamble}\n\n{body}\n"
+        completed.stderr = ""
+        with mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ), mock.patch("dgmh.patina_judge.Path.exists", return_value=True):
+            out = humanness_rewrite_with_profile(
+                "원본 텍스트", patina_bin="/fake/patina.js"
+            )
+        self.assertEqual(out, body)
+        self.assertNotIn("AI 티", out or "")
+        self.assertNotIn("다만", out or "")
+
 
 if __name__ == "__main__":
     unittest.main()

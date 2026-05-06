@@ -2,8 +2,8 @@
 
 Buckets gated on activity since last bot send:
   active (< 30s)   → [3, 20]
-  warm   (< 600s)  → [10, 120]
-  cold   (>= 600s) → [60, 900]
+  warm   (< 600s)  → [5, 45]
+  cold   (>= 600s) → [10, 90]
 
 AC1.1: when the inbound author is the operator (user id 266436073557590016
 by default), the operator-shortcut bucket fires regardless of activity:
@@ -76,8 +76,8 @@ class TestHumanLatencyBuckets(unittest.TestCase):
             for _ in range(200)
         ]
         for s in samples:
-            self.assertGreaterEqual(s, 10.0)
-            self.assertLessEqual(s, 120.0)
+            self.assertGreaterEqual(s, 5.0)
+            self.assertLessEqual(s, 45.0)
 
     def test_cold_bucket(self) -> None:
         _record_bot_send("ch-c", ts=1000.0)
@@ -88,8 +88,8 @@ class TestHumanLatencyBuckets(unittest.TestCase):
             for _ in range(200)
         ]
         for s in samples:
-            self.assertGreaterEqual(s, 60.0)
-            self.assertLessEqual(s, 900.0)
+            self.assertGreaterEqual(s, 10.0)
+            self.assertLessEqual(s, 90.0)
 
     def test_no_history_uses_cold_bucket(self) -> None:
         # Empty history → seconds_since_last_msg returns 1e9 → cold.
@@ -100,8 +100,8 @@ class TestHumanLatencyBuckets(unittest.TestCase):
             for _ in range(50)
         ]
         for s in samples:
-            self.assertGreaterEqual(s, 60.0)
-            self.assertLessEqual(s, 900.0)
+            self.assertGreaterEqual(s, 10.0)
+            self.assertLessEqual(s, 90.0)
 
     def test_active_bucket_median_below_warm_median(self) -> None:
         """Sanity: bucket means are ordered active < warm < cold."""

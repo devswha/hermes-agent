@@ -352,8 +352,8 @@ def _human_latency_seconds(
     if last_ago < 30.0:
         return max(3.0, min(20.0, rng_.gauss(8.0, 4.0)))
     if last_ago < 600.0:
-        return max(10.0, min(120.0, rng_.gauss(35.0, 20.0)))
-    return max(60.0, min(900.0, rng_.gauss(180.0, 90.0)))
+        return max(5.0, min(45.0, rng_.gauss(15.0, 8.0)))
+    return max(10.0, min(90.0, rng_.gauss(30.0, 15.0)))
 
 
 def _public_human_mode_enabled() -> bool:
