@@ -148,7 +148,7 @@ class TestPruneLogic(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
                 os.environ.pop("DGMH_PRUNE_DISABLED", None)
                 n = _prune_polluting_message(
-                    "5-bullet polluting reply text here",
+                    message_id="discord-msg-1",
                     ai_score=20.0,
                 )
             self.assertEqual(n, 1)
@@ -167,7 +167,7 @@ class TestPruneLogic(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
                 os.environ.pop("DGMH_PRUNE_DISABLED", None)
                 n = _prune_polluting_message(
-                    "clean human reply",
+                    message_id="discord-msg-1",
                     ai_score=5.0,
                 )
             self.assertEqual(n, 0)
@@ -187,7 +187,7 @@ class TestPruneLogic(unittest.TestCase):
                 os.environ, {"HERMES_HOME": tmp, "DGMH_PRUNE_DISABLED": "1"}
             ):
                 n = _prune_polluting_message(
-                    "polluting reply",
+                    message_id="discord-msg-1",
                     ai_score=50.0,
                 )
             self.assertEqual(n, 0)
@@ -209,7 +209,7 @@ class TestPruneLogic(unittest.TestCase):
             ):
                 os.environ.pop("DGMH_PRUNE_DISABLED", None)
                 n = _prune_polluting_message(
-                    "moderate reply",
+                    message_id="discord-msg-1",
                     ai_score=8.0,
                 )
             self.assertEqual(n, 1)
@@ -227,11 +227,92 @@ class TestPruneLogic(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
                 os.environ.pop("DGMH_PRUNE_DISABLED", None)
                 n = _prune_polluting_message(
-                    "high score user text",
+                    message_id="discord-msg-1",
                     ai_score=99.0,
                 )
             self.assertEqual(n, 0)
             self.assertEqual(self._count(db), 1)
+
+    def test_prune_robust_to_content_mutation(self) -> None:
+        """AC11 (v3): rewrite stage mutates content; prune still hits.
+
+        State.db row was written BEFORE the rewrite, so its content is the
+        pre-rewrite draft. The score thread runs with the post-rewrite
+        text. The previous content-matching prune missed; the new
+        recency-keyed prune still removes the row.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "user", "야"),
+                    ("s1", "assistant", "PRE-REWRITE chatgpt-style draft"),
+                ],
+            )
+            # Caller passes the POST-rewrite content, but the implementation
+            # ignores content entirely — prune still hits the recent row.
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    message_id="discord-msg-99",
+                    ai_score=99.0,
+                )
+            self.assertEqual(n, 1)
+            self.assertEqual(self._count(db), 1)
+
+    def test_prune_only_one_row_with_multiple_recent_assistants(self) -> None:
+        """Two recent assistant rows → prune deletes ONLY the most recent
+        (rowcount == 1, never accidentally cascading)."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._make_db(
+                tmp,
+                [
+                    ("s1", "assistant", "older bot reply"),
+                    ("s1", "assistant", "newest bot reply"),
+                ],
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                n = _prune_polluting_message(
+                    message_id="discord-msg-1",
+                    ai_score=50.0,
+                )
+            self.assertEqual(n, 1)
+            # Two rows in fixture → one removed → one remaining.
+            self.assertEqual(self._count(db), 1)
+
+    def test_ac11_ten_forced_pollutions_all_pruned(self) -> None:
+        """AC11 (v3): 10 forced pollutions → rowcount=1 each time.
+
+        Repeats the prune cycle ten times against a fresh-each-iteration db,
+        verifying the keyed-by-recency delete consistently removes a single
+        row regardless of content.
+        """
+        import tempfile
+
+        for i in range(10):
+            with tempfile.TemporaryDirectory() as tmp:
+                db = self._make_db(
+                    tmp,
+                    [
+                        ("s1", "user", f"user msg {i}"),
+                        ("s1", "assistant", f"polluting bot reply {i}"),
+                    ],
+                )
+                with mock.patch.dict(
+                    os.environ, {"HERMES_HOME": tmp}, clear=False
+                ):
+                    os.environ.pop("DGMH_PRUNE_DISABLED", None)
+                    n = _prune_polluting_message(
+                        message_id=f"discord-msg-{i}",
+                        ai_score=50.0,
+                    )
+                self.assertEqual(n, 1, f"iteration {i}: expected rowcount=1")
+                self.assertEqual(self._count(db), 1, f"iteration {i}: user row should remain")
 
 
 if __name__ == "__main__":

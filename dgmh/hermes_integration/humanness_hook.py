@@ -170,16 +170,40 @@ def _should_score(content: str) -> bool:
     return True
 
 
-def _prune_polluting_message(content: str, *, ai_score: float) -> int:
-    """Delete the polluting assistant row from state.db.messages.
+_PRUNE_RECENT_LOOKBACK_S = 60.0
 
-    Matches by exact content + role=assistant + recent timestamp so the
-    delete is conservative — same prose in the last few minutes is almost
-    certainly the message we just scored. Returns the number of rows
-    deleted (0 or 1 in practice).
 
-    Disabled by setting DGMH_PRUNE_DISABLED. Threshold overridden via
-    DGMH_PRUNE_AI_THRESHOLD (default 15.0).
+def _prune_polluting_message(
+    *,
+    message_id: Optional[str] = None,
+    ai_score: float,
+    lookback_s: float = _PRUNE_RECENT_LOOKBACK_S,
+) -> int:
+    """Delete the most-recent polluting assistant row from state.db.messages.
+
+    Step 5 (v3): keys by recency rather than content match.
+
+    Hermes' state.db ``messages`` schema is keyed by an internal
+    auto-increment ``id``; it does NOT carry a Discord ``message_id``
+    column. The previous implementation matched by ``content``, which
+    silently broke whenever any mid-flight rewrite stage (humanness
+    rewrite, future patina-profile rewrite) mutated the outbound text
+    — Hermes core wrote the draft before the wrap, so the post-rewrite
+    text never matched any row.
+
+    The fix: delete the single most-recent ``role='assistant'`` row
+    inserted within ``lookback_s`` seconds of "now". Because the
+    background score thread fires immediately after ``adapter.send``,
+    that row is overwhelmingly the polluting reply we just scored.
+
+    ``message_id`` is the Discord message id (passed in for telemetry
+    only — it does not appear in the state.db schema, so we cannot
+    filter on it; logged for traceability).
+
+    Returns the number of rows deleted (0 or 1 in practice).
+
+    Disabled by setting ``DGMH_PRUNE_DISABLED``. Threshold overridden
+    via ``DGMH_PRUNE_AI_THRESHOLD`` (default 15.0).
     """
     import sqlite3
 
@@ -202,14 +226,30 @@ def _prune_polluting_message(content: str, *, ai_score: float) -> int:
     try:
         con = sqlite3.connect(str(db_path), timeout=5.0)
         cur = con.cursor()
+        # Two-step delete-by-id so we only ever remove ONE row even if
+        # several assistant messages fall inside the lookback window.
+        row = cur.execute(
+            "SELECT id FROM messages "
+            "WHERE role = 'assistant' "
+            "AND timestamp > strftime('%s','now') - ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1",
+            (lookback_s,),
+        ).fetchone()
+        if row is None:
+            con.close()
+            return 0
+        target_id = row[0]
         n = cur.execute(
-            "DELETE FROM messages "
-            "WHERE role = 'assistant' AND content = ? "
-            "AND timestamp > strftime('%s','now') - ?",
-            (content, _PRUNE_LOOKBACK_SECONDS),
+            "DELETE FROM messages WHERE id = ?", (target_id,)
         ).rowcount
         con.commit()
         con.close()
+        if n and message_id:
+            logger.info(
+                "humanness_hook: pruned state.db row id=%s for discord msg=%s "
+                "(ai=%.1f >= threshold)",
+                target_id, message_id, ai_score,
+            )
         return n
     except Exception:
         logger.exception("humanness_hook: prune query failed")
@@ -233,7 +273,12 @@ def _score_in_thread(
     structural_hit, struct_flags = _structural_pollution_check(content)
     if structural_hit and not os.environ.get("DGMH_PRUNE_DISABLED"):
         # Force prune by passing a synthetic high score above threshold.
-        pruned_pre = _prune_polluting_message(content, ai_score=999.0)
+        # Step 5 (v3): prune is keyed by recency, not content, so the
+        # rewrite stages can mutate ``content`` mid-flight without breaking
+        # the prune.
+        pruned_pre = _prune_polluting_message(
+            message_id=message_id, ai_score=999.0
+        )
         if pruned_pre:
             logger.info(
                 "[humanness_hook] structural pre-prune (%s) removed %d row",
@@ -250,7 +295,7 @@ def _score_in_thread(
             # not already remove the row.
             if pruned_count == 0:
                 pruned_count = _prune_polluting_message(
-                    content, ai_score=result.ai_score
+                    message_id=message_id, ai_score=result.ai_score
                 )
                 if pruned_count:
                     logger.info(
