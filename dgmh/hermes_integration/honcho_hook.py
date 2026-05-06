@@ -95,6 +95,26 @@ def _wrap_send(adapter: Any) -> None:
     ):
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
 
+        # Step 4 stage 7 (v3): if humanness's inner wrap published a
+        # post-rewrite content into the ContextVar, mirror THAT into the
+        # peer memory layer so Honcho never accumulates pre-rewrite drafts.
+        try:
+            from dgmh.honcho_client import get_post_rewrite_content
+
+            post_rewrite = get_post_rewrite_content()
+            if post_rewrite is not None and post_rewrite != content:
+                logger.info(
+                    "[honcho_hook] mirroring post-rewrite content for chat=%s "
+                    "(pre-len=%d post-len=%d)",
+                    chat_id, len(content), len(post_rewrite),
+                )
+                content = post_rewrite
+        except Exception:
+            logger.exception(
+                "[honcho_hook] post-rewrite content read failed; "
+                "falling back to local content"
+            )
+
         try:
             if _is_disabled() or not _is_recordable(content):
                 return result

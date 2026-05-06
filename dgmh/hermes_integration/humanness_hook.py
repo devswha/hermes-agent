@@ -461,16 +461,67 @@ def _wrap_send(adapter: Any) -> None:
         reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ):
-        # Pre-send rewrite: if the outbound content has clear structural
-        # pollution AND rewrite is enabled, rewrite it via Codex before
-        # actually posting to Discord. The user sees only the cleaned text.
-        # This is gated by DGMH_REWRITE_ENABLED to allow disabling in tests
-        # or under high latency budgets.
+        # Pre-send rewrite. Step 4 (v3) splits the rewrite path by channel:
+        #
+        #   public + DGMH_PUBLIC_HUMAN_MODE=1
+        #     → humanness_rewrite_with_profile(profile="social",
+        #         backend="codex-cli") (Step P1 surface). Falls back to
+        #         humanness_rewrite (Codex-direct) on None per D8 in plan.
+        #   1:1 (or any non-public surface)
+        #     → existing humanness_rewrite, only when DGMH_REWRITE_ENABLED
+        #         (preserves AC7 verifier baseline behavior).
         rewrite_enabled = (
             bool(os.environ.get("DGMH_REWRITE_ENABLED"))
             and not os.environ.get("DGMH_REWRITE_DISABLED")
         )
-        if rewrite_enabled and _should_score(content):
+
+        is_public_mode = False
+        try:
+            from dgmh.honcho_client import is_public_channel
+
+            is_public_mode = (
+                _public_human_mode_enabled() and is_public_channel(str(chat_id))
+            )
+        except Exception:
+            logger.exception(
+                "[humanness_hook] public-mode resolver failed; defaulting off"
+            )
+
+        if is_public_mode and _should_score(content):
+            # Step 4 stage 3 (public path): patina --profile social rewrite.
+            # Always attempts a rewrite, structural pollution or not — the
+            # social profile is responsible for amplifying voice traits.
+            try:
+                from dgmh.patina_judge import (
+                    humanness_rewrite,
+                    humanness_rewrite_with_profile,
+                )
+
+                rewritten = await asyncio.to_thread(
+                    humanness_rewrite_with_profile,
+                    content,
+                    profile="social",
+                    backend="codex-cli",
+                    timeout_s=30.0,
+                )
+                if rewritten is None:
+                    # D8 fallback: Codex-direct prompt as a safety net.
+                    rewritten = await asyncio.to_thread(
+                        humanness_rewrite, content, timeout_s=60.0
+                    )
+
+                if rewritten and rewritten != content:
+                    logger.info(
+                        "[humanness_hook] public-mode rewrite applied "
+                        "(len=%d→%d)",
+                        len(content), len(rewritten),
+                    )
+                    content = rewritten
+            except Exception:
+                logger.exception(
+                    "[humanness_hook] public-mode rewrite failed; using original"
+                )
+        elif rewrite_enabled and _should_score(content):
             structural_hit, struct_flags = _structural_pollution_check(content)
             if structural_hit:
                 try:
@@ -501,6 +552,21 @@ def _wrap_send(adapter: Any) -> None:
                     logger.exception(
                         "[humanness_hook] pre-send rewrite failed; using original"
                     )
+
+        # Step 4 stage 7 (v3): publish the post-rewrite content into the
+        # ContextVar so the outer honcho wrapper mirrors the FINAL outbound
+        # text rather than the pre-rewrite draft it received as its own
+        # ``content`` parameter. Honcho reads with a None default, so when
+        # we are NOT in a rewrite path the var stays unset and honcho
+        # falls back to its local content.
+        try:
+            from dgmh.honcho_client import set_post_rewrite_content
+
+            set_post_rewrite_content(content)
+        except Exception:
+            logger.exception(
+                "[humanness_hook] could not publish post-rewrite content"
+            )
 
         # Step 2 (v3): bimodal humanlike pre-send sleep for public channels.
         # Gated by DGMH_PUBLIC_HUMAN_MODE=1 AND public channel — with the

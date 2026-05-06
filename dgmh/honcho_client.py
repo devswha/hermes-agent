@@ -56,6 +56,36 @@ _channel_kind: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# Step 4 (v3): post-rewrite content propagation across the wrap chain.
+#
+# Wrap chain (outer→inner): honcho → humanness → bare adapter.send. The
+# humanness wrapper rewrites ``content`` mid-flight; honcho's local
+# ``content`` parameter still holds the pre-rewrite text. To let honcho's
+# bot-mirror persist the post-rewrite content (AC14), humanness sets this
+# ContextVar to the final outbound text before calling its inner send.
+# Honcho's wrapped_send reads it after ``original_send`` returns and uses
+# it as the mirror payload, falling back to local ``content`` when unset.
+_post_rewrite_content: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "dgmh_post_rewrite_content", default=None
+)
+
+
+def set_post_rewrite_content(content: Optional[str]) -> contextvars.Token:
+    """Set the post-rewrite outbound content for the active wrap chain.
+
+    humanness calls this immediately before ``await original_send`` so the
+    next outer wrapper observes the rewritten text. Pass ``None`` (or just
+    do not call this) to leave the var at default and let outer wrappers
+    fall back to their local ``content``.
+    """
+    return _post_rewrite_content.set(content)
+
+
+def get_post_rewrite_content() -> Optional[str]:
+    """Read the post-rewrite content for the active wrap chain, or None."""
+    return _post_rewrite_content.get()
+
+
 _VALID_CHANNEL_KINDS = ("operator", "public")
 
 
