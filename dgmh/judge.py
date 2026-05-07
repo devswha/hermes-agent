@@ -36,8 +36,21 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TIMEOUT_S: float = 60.0
+_DEFAULT_TIMEOUT_S: float = 180.0
 _DEFAULT_CODEX_BIN: str = os.environ.get("DGMH_CODEX_BIN", "codex")
+
+
+def _resolve_timeout_s(default: float = _DEFAULT_TIMEOUT_S) -> float:
+    """Read DGMH_CODEX_TIMEOUT_S env override; fall back to default. Clamps
+    to [10.0, 600.0] to avoid pathological config errors."""
+    raw = os.environ.get("DGMH_CODEX_TIMEOUT_S")
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(10.0, min(600.0, val))
 
 # Score envelope that Codex must return per call
 _SCORE_ENVELOPE_PROMPT = """\
@@ -113,7 +126,7 @@ def extract_first_json_object(text: str) -> dict[str, Any] | None:
 # Subprocess invocation (mirrors codexSubprocess.ts spawnSubprocess)
 # ---------------------------------------------------------------------------
 
-def _invoke_codex(prompt: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> str:
+def _invoke_codex(prompt: str, *, timeout_s: float | None = None) -> str:
     """Invoke Codex CLI via subprocess, return stdout. Fail-closed.
 
     Mirrors codexSubprocess.ts::spawnSubprocess semantics:
@@ -123,10 +136,16 @@ def _invoke_codex(prompt: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> str:
     - empty stdout → CodexJudgeError
     - spawn error → CodexJudgeError
 
-    Env override: DGMH_CODEX_BIN (default "codex")
+    Env overrides:
+      DGMH_CODEX_BIN — codex binary path (default "codex")
+      DGMH_CODEX_TIMEOUT_S — subprocess timeout in seconds (default 180,
+                             clamped to [10, 600])
     """
     binary = os.environ.get("DGMH_CODEX_BIN", _DEFAULT_CODEX_BIN)
     args = [binary, "exec", "-"]
+
+    if timeout_s is None:
+        timeout_s = _resolve_timeout_s()
 
     start = time.monotonic()
     try:

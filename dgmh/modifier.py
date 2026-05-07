@@ -49,9 +49,22 @@ if str(_HERMES_ROOT) not in sys.path:
 # Configuration
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TIMEOUT_S: float = 60.0
+_DEFAULT_TIMEOUT_S: float = 180.0
 _DEFAULT_RECENT_N: int = 5
 _DEFAULT_MAX_SCOPE_ATTEMPTS: int = 3
+
+
+def _resolve_timeout_s(default: float = _DEFAULT_TIMEOUT_S) -> float:
+    """Read DGMH_CODEX_TIMEOUT_S env override; fall back to default. Clamps
+    to [10.0, 600.0] to avoid pathological config errors."""
+    raw = os.environ.get("DGMH_CODEX_TIMEOUT_S")
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(10.0, min(600.0, val))
 
 # Denied path substrings for skill-domain scope guard
 # (mirrors selfModScope.ts SELF_MOD_DENIED_PATTERNS, adapted for Hermes)
@@ -135,7 +148,7 @@ class SkillCandidate:
 # ---------------------------------------------------------------------------
 
 
-def _invoke_codex(prompt: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> str:
+def _invoke_codex(prompt: str, *, timeout_s: float | None = None) -> str:
     """Invoke Codex CLI via subprocess, return stdout. Fail-closed.
 
     Mirrors judge.py::_invoke_codex — identical semantics:
@@ -145,10 +158,16 @@ def _invoke_codex(prompt: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> str:
     - empty stdout → CodexModifierError
     - spawn error → CodexModifierError
 
-    Env override: DGMH_CODEX_BIN (default "codex")
+    Env overrides:
+      DGMH_CODEX_BIN — codex binary path (default "codex")
+      DGMH_CODEX_TIMEOUT_S — subprocess timeout in seconds (default 180,
+                             clamped to [10, 600])
     """
     binary = os.environ.get("DGMH_CODEX_BIN", "codex")
     args = [binary, "exec", "-"]
+
+    if timeout_s is None:
+        timeout_s = _resolve_timeout_s()
 
     start = time.monotonic()
     try:
