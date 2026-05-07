@@ -553,6 +553,27 @@ def _wrap_send(adapter: Any) -> None:
                         "[humanness_hook] pre-send rewrite failed; using original"
                     )
 
+        # Pre-send length gate (skill-backed, with in-process fallback). Final
+        # length enforcement after patina rewrite to honor SOUL.md 1-2 sentence
+        # cap. Handles both public and 1:1 paths uniformly.
+        try:
+            from dgmh.hermes_integration.pre_send_gate import gate as _length_gate
+            from dgmh.honcho_client import channel_kind_for as _channel_kind_for
+
+            _kind = _channel_kind_for(str(chat_id))
+            _decision, _new_content = _length_gate(
+                content, channel_kind=_kind
+            )
+            if _decision != "send" and _new_content != content:
+                logger.info(
+                    "[humanness_hook] length gate applied "
+                    "(decision=%s len=%d→%d)",
+                    _decision, len(content), len(_new_content),
+                )
+                content = _new_content
+        except Exception:
+            logger.exception("[humanness_hook] length gate failed; using rewrite output as-is")
+
         # Step 4 stage 7 (v3): publish the post-rewrite content into the
         # ContextVar so the outer honcho wrapper mirrors the FINAL outbound
         # text rather than the pre-rewrite draft it received as its own
