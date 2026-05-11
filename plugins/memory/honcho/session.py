@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
 import logging
@@ -621,7 +622,7 @@ class HonchoSessionManager:
         with self._prefetch_cache_lock:
             return self._context_cache.pop(session_key, {})
 
-    def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
+    def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, Any]:
         """
         Pre-fetch user and AI peer context from Honcho.
 
@@ -644,7 +645,7 @@ class HonchoSessionManager:
         if not session:
             return {}
 
-        result: dict[str, str] = {}
+        result: dict[str, Any] = {}
 
         # Session summary — provides session-scoped context.
         # Fresh sessions (per-session cold start, or first-ever per-directory)
@@ -656,6 +657,20 @@ class HonchoSessionManager:
                 ctx = honcho_session.context(summary=True)
                 if ctx.summary and getattr(ctx.summary, "content", None):
                     result["summary"] = ctx.summary.content
+                # DGM-H: ambient channel turns for public-mode persona.
+                # Gated by DGMH_HONCHO_INJECT_RECENT — reuses the same
+                # context() call (no extra Honcho round-trip).
+                if os.environ.get("DGMH_HONCHO_INJECT_RECENT"):
+                    msgs = getattr(ctx, "messages", None)
+                    if msgs:
+                        recent = msgs[-10:]
+                        result["recent_messages"] = [
+                            {
+                                "role": getattr(m, "peer_id", "unknown"),
+                                "content": (getattr(m, "content", None) or "")[:500],
+                            }
+                            for m in recent
+                        ]
         except Exception as e:
             logger.debug("Failed to fetch session summary from Honcho: %s", e)
 

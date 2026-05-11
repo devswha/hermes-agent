@@ -490,6 +490,24 @@ class HonchoMemoryProvider(MemoryProvider):
         if ai_card:
             parts.append(f"## AI Identity Card\n{ai_card}")
 
+        # DGM-H: ambient channel turns for public-mode persona.
+        # Populated by session.py:get_prefetch_context only when
+        # DGMH_HONCHO_INJECT_RECENT is set. Placed last so
+        # _truncate_to_budget trims this block first when the token
+        # budget tightens.
+        recent = ctx.get("recent_messages") or []
+        if recent:
+            formatted_turns = "\n".join(
+                f"  [{m.get('role', 'unknown')}] {(m.get('content') or '')[:500]}"
+                for m in recent
+            )
+            parts.append(
+                "## Recent channel turns\n"
+                "Use these as ambient context for what was just said on this "
+                "channel — do not quote verbatim.\n"
+                f"{formatted_turns}"
+            )
+
         if not parts:
             return ""
         return "\n\n".join(parts)

@@ -941,6 +941,37 @@ class TestBaseContextSummary:
         formatted = provider._format_first_turn_context(ctx)
         assert "Session Summary" not in formatted
 
+    def test_format_recent_channel_turns_block_rendered(self):
+        """DGM-H: recent_messages list renders into the ambient-context block."""
+        provider = HonchoMemoryProvider()
+        ctx = {
+            "summary": "S",
+            "recent_messages": [
+                {"role": "user-1", "content": "방금 한 얘기"},
+                {"role": "assistant-1", "content": "그거였어"},
+            ],
+        }
+        formatted = provider._format_first_turn_context(ctx)
+        assert "## Recent channel turns" in formatted
+        assert "[user-1] 방금 한 얘기" in formatted
+        assert "[assistant-1] 그거였어" in formatted
+        # Block must come LAST so _truncate_to_budget trims it first.
+        assert formatted.index("Recent channel turns") > formatted.index("Session Summary")
+
+    def test_format_recent_messages_absent_skipped(self):
+        """No recent_messages key means no ambient-context section."""
+        provider = HonchoMemoryProvider()
+        ctx = {"summary": "S", "representation": "R"}
+        formatted = provider._format_first_turn_context(ctx)
+        assert "Recent channel turns" not in formatted
+
+    def test_format_recent_messages_empty_list_skipped(self):
+        """Empty recent_messages list should not produce a section."""
+        provider = HonchoMemoryProvider()
+        ctx = {"summary": "S", "recent_messages": []}
+        formatted = provider._format_first_turn_context(ctx)
+        assert "Recent channel turns" not in formatted
+
 
 class TestDialecticDepth:
     """Tests for the dialecticDepth multi-pass system."""
