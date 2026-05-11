@@ -113,12 +113,18 @@ def gate(
     max_chars: int | None = None,
     timeout_s: float = 35.0,
     skill_bin: str | None = None,
+    pre_rewritten: bool = False,
 ) -> tuple[str, str]:
     """Run the pre-send length gate.
 
     Returns ``(decision, content)`` where ``decision`` is ``"send"``,
     ``"compress"``, or ``"silent"``. Caller is responsible for honoring
     the decision (e.g. dropping the send when ``"silent"``).
+
+    ``pre_rewritten=True`` tells the gate skill that ``content`` has
+    already been through a patina rewrite (e.g., from humanness_hook's
+    pre-send path) so the skill skips its own redundant patina call
+    and goes straight to the sentence-boundary truncate when needed.
     """
     cap = max_chars if max_chars is not None else _resolve_max_chars(channel_kind)
 
@@ -139,6 +145,7 @@ def gate(
         "content": content,
         "channel_kind": channel_kind,
         "max_chars": cap,
+        "pre_rewritten": bool(pre_rewritten),
     }
     payload = json.dumps(request, ensure_ascii=False)
 

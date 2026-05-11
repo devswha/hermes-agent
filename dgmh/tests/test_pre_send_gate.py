@@ -90,6 +90,53 @@ class TestGateSkillPath(unittest.TestCase):
         self.assertEqual(decision, "compress")
         self.assertEqual(out, "short")
 
+    def test_pre_rewritten_forwarded_to_skill(self) -> None:
+        # When humanness_hook has already rewritten the content, the gate
+        # must forward `pre_rewritten=true` in its request JSON so the
+        # skill skips its own redundant patina call (DGM-H W1 dedup).
+        content = "x" * 500
+        fake_result = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "decision": "compress",
+                    "content": "short",
+                    "reason": "pre_rewritten_truncate",
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+            gate_mod.subprocess, "run", return_value=fake_result
+        ) as mock_run:
+            gate(
+                content,
+                channel_kind="public",
+                skill_bin=_REAL_SKILL_BIN,
+                pre_rewritten=True,
+            )
+            # Inspect the stdin payload to confirm the flag flows through.
+            kwargs = mock_run.call_args.kwargs
+            payload = json.loads(kwargs["input"])
+            self.assertTrue(payload.get("pre_rewritten"))
+
+    def test_pre_rewritten_defaults_to_false(self) -> None:
+        # Backwards-compat: callers that do not pass pre_rewritten still
+        # get `pre_rewritten=false` in the request — gate skill should
+        # behave exactly like before.
+        content = "x" * 500
+        fake_result = mock.Mock(
+            returncode=0,
+            stdout=json.dumps({"decision": "compress", "content": "short"}),
+            stderr="",
+        )
+        with mock.patch.object(
+            gate_mod.subprocess, "run", return_value=fake_result
+        ) as mock_run:
+            gate(content, channel_kind="public", skill_bin=_REAL_SKILL_BIN)
+            payload = json.loads(mock_run.call_args.kwargs["input"])
+            self.assertFalse(payload.get("pre_rewritten"))
+
     def test_skill_subprocess_timeout(self) -> None:
         content = "long. " * 80  # exceeds 200
         with mock.patch.object(
