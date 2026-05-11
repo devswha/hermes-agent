@@ -22,8 +22,10 @@ from unittest import mock
 
 from dgmh.honcho_client import (
     _channel_kind,
+    add_user_message,
     capture_context_with_kind,
     channel_kind_for,
+    chat_about_public_persona,
     get_channel_kind,
     is_public_channel,
     session_id_for_channel,
@@ -181,6 +183,90 @@ class TestChannelKindPropagatesAcrossThreads(unittest.TestCase):
 
         self.assertEqual(observed_public, ["public"])
         self.assertEqual(observed_operator, ["operator"])
+
+
+class _FakePeer:
+    def __init__(self, name: str) -> None:
+        self.id = name
+        self.name = name
+
+    def message(self, content: str, metadata=None):
+        return {"peer": self.name, "content": content, "metadata": metadata or {}}
+
+    def chat(self, query: str):
+        class _Resp:
+            content = f"{query} 공개 채널 말투는 짧고 자연스럽게 유지한다."
+
+        return _Resp()
+
+
+class _FakeSession:
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.messages = []
+
+    def add_messages(self, messages):
+        self.messages.extend(messages)
+
+
+class _FakeHoncho:
+    def __init__(self) -> None:
+        self.peers: list[str] = []
+        self.sessions: dict[str, _FakeSession] = {}
+
+    def peer(self, name: str):
+        self.peers.append(name)
+        return _FakePeer(name)
+
+    def session(self, session_id: str):
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = _FakeSession(session_id)
+            self.sessions[session_id] = session
+        return session
+
+
+class TestPublicHonchoPeerIsolation(unittest.TestCase):
+    def test_public_user_messages_use_public_peer_not_operator_peer(self) -> None:
+        fake = _FakeHoncho()
+        env = {
+            "DGMH_HONCHO_PUBLIC_PEER": "public-room",
+            "DGMH_HONCHO_OPERATOR_PEER": "operator-private",
+            "DGMH_HONCHO_BOT_PEER": "flask",
+        }
+        with mock.patch.dict(os.environ, env), mock.patch(
+            "dgmh.honcho_client.get_client",
+            return_value=fake,
+        ):
+            ok = add_user_message(
+                channel_id="1496735735078715542",
+                thread_id=None,
+                content="정신챙겨봐",
+                kind="public",
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("public-room", fake.peers)
+        self.assertNotIn("operator-private", fake.peers)
+        session = fake.sessions["discord-public-1496735735078715542"]
+        self.assertEqual(session.messages[0]["peer"], "public-room")
+        self.assertEqual(session.messages[0]["metadata"]["channel_kind"], "public")
+
+    def test_public_snapshot_chat_uses_public_peer(self) -> None:
+        fake = _FakeHoncho()
+        env = {
+            "DGMH_HONCHO_PUBLIC_PEER": "public-room",
+            "DGMH_HONCHO_OPERATOR_PEER": "operator-private",
+        }
+        with mock.patch.dict(os.environ, env), mock.patch(
+            "dgmh.honcho_client.get_client",
+            return_value=fake,
+        ):
+            out = chat_about_public_persona("공개 채널 톤?")
+
+        self.assertIn("공개 채널", out)
+        self.assertIn("public-room", fake.peers)
+        self.assertNotIn("operator-private", fake.peers)
 
 
 if __name__ == "__main__":

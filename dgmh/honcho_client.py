@@ -8,7 +8,8 @@ prompt without each call site re-implementing the SDK boilerplate.
 Concepts (mapped to our world):
 
   - Workspace: a single namespace, default ``dgmh-flask``.
-  - Peers: ``devswha`` (operator), ``flask`` (the bot itself).
+  - Peers: ``devswha`` (operator), ``flask`` (the bot itself),
+    ``flask-public-room`` (public-channel crowd/persona memory).
   - Session: one per Discord chat surface — keyed by channel/thread id.
 
 Honcho is configured for the $0 self-host path: Ollama LLM (``llama3.2:3b``)
@@ -37,6 +38,7 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 _DEFAULT_WORKSPACE = "dgmh-flask"
 _DEFAULT_OPERATOR_PEER = "devswha"
 _DEFAULT_BOT_PEER = "flask"
+_DEFAULT_PUBLIC_PEER = "flask-public-room"
 
 
 # Step 6 (v3): channel-kind ContextVar.
@@ -166,6 +168,7 @@ class HonchoConfig:
     workspace_id: str
     operator_peer: str
     bot_peer: str
+    public_peer: str
 
     @classmethod
     def from_env(cls) -> "HonchoConfig":
@@ -177,6 +180,10 @@ class HonchoConfig:
                 "DGMH_HONCHO_OPERATOR_PEER", _DEFAULT_OPERATOR_PEER
             ),
             bot_peer=os.environ.get("DGMH_HONCHO_BOT_PEER", _DEFAULT_BOT_PEER),
+            public_peer=os.environ.get(
+                "DGMH_HONCHO_PUBLIC_PEER",
+                os.environ.get("DGMH_HONCHO_PUBLIC_PERSONA_PEER", _DEFAULT_PUBLIC_PEER),
+            ),
         )
 
 
@@ -267,7 +274,9 @@ def add_user_message(
     content: str,
     kind: Optional[str] = None,
 ) -> bool:
-    """Persist an inbound (operator) message to Honcho. Returns True on success.
+    """Persist an inbound user/public-room message to Honcho.
+
+    Returns True on success.
 
     The active ``_channel_kind`` ContextVar (or an explicit ``kind`` kwarg)
     determines which session namespace this write lands in. Background
@@ -283,11 +292,12 @@ def add_user_message(
         kind = _channel_kind.get()
     cfg = HonchoConfig.from_env()
     try:
-        operator = client.peer(cfg.operator_peer)
+        user_peer_name = cfg.public_peer if kind == "public" else cfg.operator_peer
+        user_peer = client.peer(user_peer_name)
         session = client.session(
             session_id_for_channel(channel_id, thread_id, kind=kind)
         )
-        session.add_messages([_build_message(operator, content, kind=kind)])
+        session.add_messages([_build_message(user_peer, content, kind=kind)])
         return True
     except Exception:
         logger.exception("honcho add_user_message failed")
@@ -474,7 +484,7 @@ def get_cached_persona_snapshot(query: str | None = None) -> str:
     )
     token = _channel_kind.set("public")
     try:
-        raw = chat_about_operator(q).strip()
+        raw = chat_about_public_persona(q).strip()
     finally:
         _channel_kind.reset(token)
 
@@ -490,6 +500,16 @@ def get_cached_persona_snapshot(query: str | None = None) -> str:
 
 def chat_about_operator(query: str) -> str:
     """Ask Honcho a natural-language question about the operator. Empty on fail."""
+    return _chat_about_peer(query, kind="operator")
+
+
+def chat_about_public_persona(query: str) -> str:
+    """Ask Honcho about the public-channel persona/crowd memory, not operator memory."""
+    return _chat_about_peer(query, kind="public")
+
+
+def _chat_about_peer(query: str, *, kind: str) -> str:
+    """Ask Honcho a natural-language question about the peer for ``kind``."""
     if _is_disabled():
         return ""
     client = get_client()
@@ -497,13 +517,14 @@ def chat_about_operator(query: str) -> str:
         return ""
     cfg = HonchoConfig.from_env()
     try:
-        operator = client.peer(cfg.operator_peer)
-        response = operator.chat(query)
+        peer_name = cfg.public_peer if kind == "public" else cfg.operator_peer
+        peer = client.peer(peer_name)
+        response = peer.chat(query)
         if hasattr(response, "content"):
             return str(response.content)
         return str(response)
     except Exception:
-        logger.exception("honcho chat lookup failed")
+        logger.exception("honcho chat lookup failed kind=%s", kind)
         return ""
 
 
@@ -523,11 +544,13 @@ def bootstrap() -> dict:
         # peer() is implicit creation — calling it ensures the peer exists.
         operator = client.peer(cfg.operator_peer)
         bot = client.peer(cfg.bot_peer)
+        public = client.peer(cfg.public_peer)
         return {
             "status": "ok",
             "workspace": cfg.workspace_id,
             "operator_peer": str(getattr(operator, "id", cfg.operator_peer)),
             "bot_peer": str(getattr(bot, "id", cfg.bot_peer)),
+            "public_peer": str(getattr(public, "id", cfg.public_peer)),
         }
     except Exception as exc:
         logger.exception("honcho bootstrap failed")

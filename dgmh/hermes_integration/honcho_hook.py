@@ -311,13 +311,41 @@ def _augment_load_soul_md() -> None:
         if not base:
             return base
         try:
-            from dgmh.honcho_client import get_cached_operator_snapshot
+            from dgmh.honcho_client import (
+                channel_kind_for,
+                get_cached_operator_snapshot,
+                get_cached_persona_snapshot,
+                get_channel_kind,
+            )
 
-            snap = get_cached_operator_snapshot()
+            kind = get_channel_kind()
+            try:
+                from gateway.session_context import get_session_env
+
+                platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+                chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+                if platform == "discord" and chat_id:
+                    kind = channel_kind_for(chat_id)
+            except Exception:
+                logger.debug("[honcho_hook] session context lookup failed", exc_info=True)
+
+            if kind == "public":
+                snap = get_cached_persona_snapshot()
+                title = "Public persona memory snapshot"
+                desc = (
+                    "이 블록은 Honcho 가 공개 채널의 최근 상호작용을 보고 추출한 짧은 요약이야. "
+                    "운영자 1:1 기억이 아니라 공개 채널 톤/흐름 참고 신호다. "
+                )
+            else:
+                snap = get_cached_operator_snapshot()
+                title = "Operator memory snapshot"
+                desc = (
+                    "이 블록은 Honcho 가 운영자 과거 대화를 보고 추출한 짧은 요약이야. "
+                )
             if snap:
                 addendum = (
-                    "\n\n## Operator memory snapshot (from Honcho, may be partial)\n\n"
-                    "이 블록은 Honcho 가 운영자 과거 대화를 보고 추출한 짧은 요약이야. "
+                    f"\n\n## {title} (from Honcho, may be partial)\n\n"
+                    f"{desc}"
                     "절대값이 아니라 참고 신호 — SOUL.md 본문 룰이 우선이고, 이 블록은 "
                     "tone / 관심사 / 최근 작업 흐름 정도만 거든다.\n\n"
                     f"{snap}\n"
