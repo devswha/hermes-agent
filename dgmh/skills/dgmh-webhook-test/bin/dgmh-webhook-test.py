@@ -52,6 +52,18 @@ _GATE_RE = re.compile(
     r"decision=(?P<decision>\w+) in_len=(?P<in_len>\d+) out_len=(?P<out_len>\d+) "
     r"source=(?P<source>\w+) reason=(?P<reason>[^ ]+)$"
 )
+_REACTION_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) INFO "
+    r"dgmh\.hermes_integration\.reaction_hook: \[reaction_hook\] "
+    r"Reaction received: user=(?P<user>\d+) channel=(?P<chan>\d+) "
+    r"emoji=(?P<emoji>\S+) msg=(?P<msg>\d+)$"
+)
+_REACTION_CLASS_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) INFO "
+    r"dgmh\.hermes_integration\.reaction_hook: \[reaction_hook\] "
+    r"Reaction user=(?P<user>\d+) emoji=(?P<emoji>\S+) "
+    r"classification=(?P<class>[\w_]+)"
+)
 
 
 def _resolve_webhook(args: argparse.Namespace) -> Optional[str]:
@@ -183,6 +195,97 @@ def _attach_response_text(
 
 
 _SCORE_HELPER = Path(__file__).resolve().parent / "_score_helper.py"
+
+
+def _attach_reactions(
+    rows: list[dict[str, Any]],
+    log_path: Path,
+    started_at: datetime,
+) -> None:
+    """Scan agent.log for `Reaction received` events, pair them with the
+    follow-up `classification=` line, and attach each reaction to the row
+    whose response_msg_id matches. Reactions are appended to row.reactions
+    as a list of {ts, emoji, user, classification} dicts.
+    """
+    by_msg: dict[str, list[dict[str, Any]]] = {}
+    pending_class: dict[tuple[str, str], dict[str, Any]] = {}
+
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        print(f"  reaction scan failed ({log_path}): {e}", file=sys.stderr)
+        return
+
+    for line in text.splitlines():
+        m_rcv = _REACTION_RE.match(line)
+        if m_rcv:
+            ts = _parse_ts(m_rcv.group("ts"))
+            if ts < started_at:
+                continue
+            entry = {
+                "ts": m_rcv.group("ts"),
+                "user": m_rcv.group("user"),
+                "channel": m_rcv.group("chan"),
+                "emoji": m_rcv.group("emoji"),
+                "classification": None,
+            }
+            msg_id = m_rcv.group("msg")
+            by_msg.setdefault(msg_id, []).append(entry)
+            # Stash a key for the upcoming classification line.
+            pending_class[(m_rcv.group("user"), m_rcv.group("emoji"))] = entry
+            continue
+        m_cls = _REACTION_CLASS_RE.match(line)
+        if m_cls:
+            key = (m_cls.group("user"), m_cls.group("emoji"))
+            target = pending_class.pop(key, None)
+            if target is not None:
+                target["classification"] = m_cls.group("class")
+
+    # Collect every reaction as (ts, channel, msg_id, entry) so we can
+    # time-window match per-row when msg_id alone misses (e.g., the
+    # operator reacts to the inbound message, not the bot's reply).
+    all_events: list[tuple[datetime, str, str, dict[str, Any]]] = []
+    for msg_id, entries in by_msg.items():
+        for entry in entries:
+            ts = _parse_ts(entry["ts"])
+            all_events.append((ts, entry["channel"], msg_id, entry))
+
+    # Default window upper bound is 5 minutes, but for fast iteration
+    # testing each row's window is clamped at the NEXT row's inbound ts
+    # so reactions don't bleed across prompts.
+    max_window = timedelta(minutes=5)
+    row_starts = [_parse_ts(r["ts"]) for r in rows]
+
+    for idx, row in enumerate(rows):
+        rmsg = row.get("response_msg_id")
+        chan = row["chat"]
+        inb_ts = row_starts[idx]
+        upper = inb_ts + max_window
+        if idx + 1 < len(rows):
+            next_start = row_starts[idx + 1]
+            if next_start > inb_ts:
+                upper = min(upper, next_start)
+        matched: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        # 1. exact msg_id match on bot's reply (operator 👍/👎/✨ on reply)
+        if rmsg and rmsg in by_msg:
+            for entry in by_msg[rmsg]:
+                key = entry["ts"] + entry["emoji"] + entry["user"]
+                if key not in seen:
+                    seen.add(key)
+                    matched.append(entry)
+        # 2. time-window match on this row's channel (bot's auto-ack on
+        # the inbound, third-party reactions sharing the window, etc.)
+        for ts, ev_chan, _msg_id, entry in all_events:
+            if ev_chan != chan:
+                continue
+            if not (inb_ts <= ts <= upper):
+                continue
+            key = entry["ts"] + entry["emoji"] + entry["user"]
+            if key not in seen:
+                seen.add(key)
+                matched.append(entry)
+        row["reactions"] = matched
 
 
 def _score_text(text: str, scorer_bin: Path) -> dict[str, Any]:
@@ -388,9 +491,9 @@ def _emit_table(rows: list[dict[str, Any]], total_sent: int) -> None:
         )
         return
     print(
-        "| # | prompt | response | patina | gate | api | elapsed | ai_score |"
+        "| # | prompt | response | patina | gate | api | elapsed | ai_score | reactions |"
     )
-    print("|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(rows, 1):
         p = (r["prompt"] or "")[:30].replace("|", "\\|")
         resp = r["response_chars"] if r["response_chars"] is not None else "-"
@@ -413,7 +516,11 @@ def _emit_table(rows: list[dict[str, Any]], total_sent: int) -> None:
             ai = f"err: {str(r['score_error'])[:18]}"
         else:
             ai = "-"
-        print(f"| {i} | {p} | {resp} | {pat} | {gate} | {api} | {el} | {ai} |")
+        reacts = r.get("reactions") or []
+        rx = "".join(rr.get("emoji") or "" for rr in reacts) or "-"
+        print(
+            f"| {i} | {p} | {resp} | {pat} | {gate} | {api} | {el} | {ai} | {rx} |"
+        )
 
 
 def main() -> int:
@@ -506,6 +613,11 @@ def main() -> int:
     time.sleep(args.interval_s)
 
     rows = _scan_log(Path(args.log_path).expanduser(), started_at, prompts)
+
+    # Attach reactions (US-002). Cheap, always runs — reaction events
+    # come from agent.log so this is a pure local scan, no extra REST.
+    if rows:
+        _attach_reactions(rows, Path(args.log_path).expanduser(), started_at)
 
     # Score path — fetch actual reply text via Discord REST API then
     # call score_humanness. Skipped when --no-score or token absent.
