@@ -12,17 +12,23 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 
 _DEFAULT_LOG = Path("~/.hermes/logs/agent.log").expanduser()
 _DEFAULT_INTERVAL_S = 35.0
+_DEFAULT_SCORER_BIN = Path(
+    "~/workspace/hermes-agent/venv/bin/python"
+).expanduser()
+_DISCORD_API = "https://discord.com/api/v10"
+_DISCORD_UA = "DiscordBot (https://github.com/devswha/dgmh, 0.1)"
 
 _INBOUND_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) INFO gateway\.run: "
@@ -68,6 +74,171 @@ def _resolve_webhook(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
+def _resolve_env_value(env_file: Optional[str], keys: tuple[str, ...]) -> Optional[str]:
+    """Pull the first matching `KEY=value` line from a dotenv-style file."""
+    if not env_file:
+        return None
+    path = Path(env_file).expanduser()
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for key in keys:
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+def _discord_get(url: str, token: str) -> Any:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bot {token}",
+            "User-Agent": _DISCORD_UA,
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=20.0) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _resolve_bot_user_id(token: str) -> Optional[str]:
+    try:
+        me = _discord_get(f"{_DISCORD_API}/users/@me", token)
+    except Exception as e:
+        print(f"  could not resolve bot user id: {e}", file=sys.stderr)
+        return None
+    bid = me.get("id")
+    return str(bid) if bid else None
+
+
+def _fetch_channel_messages(
+    token: str,
+    channel_id: str,
+    limit: int = 100,
+) -> list[dict]:
+    """Fetch up to `limit` most-recent messages from a channel (newest first)."""
+    try:
+        return _discord_get(
+            f"{_DISCORD_API}/channels/{channel_id}/messages?limit={limit}",
+            token,
+        )
+    except Exception as e:
+        print(f"  fetch_channel_messages({channel_id}) failed: {e}", file=sys.stderr)
+        return []
+
+
+def _discord_ts_to_dt(ts: str) -> Optional[datetime]:
+    """Parse Discord ISO8601 timestamp into aware UTC datetime."""
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return datetime.fromisoformat(ts).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _attach_response_text(
+    rows: list[dict[str, Any]],
+    token: str,
+    bot_user_id: Optional[str],
+) -> None:
+    """For each row, fetch the bot's first reply after the inbound timestamp
+    in the same channel and attach `response_text` + `response_msg_id`.
+    """
+    by_channel: dict[str, list[dict]] = {}
+    for row in rows:
+        chan = row["chat"]
+        if chan not in by_channel:
+            by_channel[chan] = _fetch_channel_messages(token, chan, limit=100)
+
+    for row in rows:
+        chan = row["chat"]
+        msgs = by_channel.get(chan) or []
+        inb_ts = _parse_ts(row["ts"])
+        # Discord ts are UTC-aware; convert inbound (was naive UTC) — we
+        # parse log ts as UTC-aware already (_parse_ts).
+        candidates = []
+        for m in msgs:
+            author = m.get("author") or {}
+            aid = str(author.get("id") or "")
+            m_ts_raw = m.get("timestamp") or ""
+            m_ts = _discord_ts_to_dt(m_ts_raw)
+            if m_ts is None or m_ts <= inb_ts:
+                continue
+            # only count messages authored by the bot, when we know its id
+            if bot_user_id and aid != bot_user_id:
+                continue
+            candidates.append((m_ts, m))
+        candidates.sort(key=lambda pair: pair[0])
+        if candidates:
+            _ts, msg = candidates[0]
+            row["response_text"] = msg.get("content") or ""
+            row["response_msg_id"] = str(msg.get("id") or "")
+        else:
+            row.setdefault("response_text", None)
+            row.setdefault("response_msg_id", None)
+
+
+_SCORE_HELPER = Path(__file__).resolve().parent / "_score_helper.py"
+
+
+def _score_text(text: str, scorer_bin: Path) -> dict[str, Any]:
+    """Run score_humanness in the hermes-agent venv subprocess. Returns
+    a dict with ai_score, human_likeness, interpretation, or score_error.
+    """
+    if not text or not text.strip():
+        return {"ai_score": None, "human_likeness": None, "score_error": "empty"}
+    if not scorer_bin.exists():
+        return {
+            "ai_score": None,
+            "human_likeness": None,
+            "score_error": f"scorer python not found at {scorer_bin}",
+        }
+    if not _SCORE_HELPER.exists():
+        return {
+            "ai_score": None,
+            "human_likeness": None,
+            "score_error": f"score helper not found at {_SCORE_HELPER}",
+        }
+    try:
+        proc = subprocess.run(
+            [str(scorer_bin), str(_SCORE_HELPER)],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ai_score": None, "human_likeness": None, "score_error": "timeout"}
+    except Exception as e:
+        return {
+            "ai_score": None,
+            "human_likeness": None,
+            "score_error": f"{type(e).__name__}: {e}",
+        }
+    out = (proc.stdout or "").strip().splitlines()
+    if not out:
+        return {
+            "ai_score": None,
+            "human_likeness": None,
+            "score_error": (
+                f"empty stdout (exit={proc.returncode}, "
+                f"stderr={proc.stderr.strip()[:160]!r})"
+            ),
+        }
+    try:
+        return json.loads(out[-1])
+    except Exception as e:
+        return {
+            "ai_score": None,
+            "human_likeness": None,
+            "score_error": f"json parse: {e}; stdout_tail={out[-1][:160]!r}",
+        }
+
+
 def _load_prompts(args: argparse.Namespace) -> list[str]:
     prompts: list[str] = []
     if args.prompts:
@@ -110,11 +281,17 @@ def _post_webhook(webhook: str, content: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+_LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+
 def _parse_ts(ts_raw: str) -> datetime:
+    """agent.log stamps are in the system local timezone (Hermes runs
+    with Python's default logging, which renders local). Convert to UTC
+    so the result compares correctly with Discord REST timestamps.
+    """
     head, _, _ = ts_raw.partition(",")
-    return datetime.strptime(head, "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
+    naive = datetime.strptime(head, "%Y-%m-%d %H:%M:%S")
+    return naive.replace(tzinfo=_LOCAL_TZ).astimezone(timezone.utc)
 
 
 def _scan_log(
@@ -211,9 +388,9 @@ def _emit_table(rows: list[dict[str, Any]], total_sent: int) -> None:
         )
         return
     print(
-        "| # | prompt | response | patina | gate | api | elapsed |"
+        "| # | prompt | response | patina | gate | api | elapsed | ai_score |"
     )
-    print("|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(rows, 1):
         p = (r["prompt"] or "")[:30].replace("|", "\\|")
         resp = r["response_chars"] if r["response_chars"] is not None else "-"
@@ -230,7 +407,13 @@ def _emit_table(rows: list[dict[str, Any]], total_sent: int) -> None:
             gate = "-"
         api = r["api_calls"] if r["api_calls"] is not None else "-"
         el = f"{r['elapsed_s']:.1f}s" if r["elapsed_s"] is not None else "-"
-        print(f"| {i} | {p} | {resp} | {pat} | {gate} | {api} | {el} |")
+        if r.get("ai_score") is not None:
+            ai = f"{r['ai_score']:.1f}"
+        elif r.get("score_error"):
+            ai = f"err: {str(r['score_error'])[:18]}"
+        else:
+            ai = "-"
+        print(f"| {i} | {p} | {resp} | {pat} | {gate} | {api} | {el} | {ai} |")
 
 
 def main() -> int:
@@ -273,6 +456,23 @@ def main() -> int:
         action="store_true",
         help="suppress per-send progress lines",
     )
+    parser.add_argument(
+        "--no-score",
+        action="store_true",
+        help="skip patina_judge.score_humanness on each response",
+    )
+    parser.add_argument(
+        "--bot-token",
+        help="Discord bot token (overrides --webhook-env DISCORD_TOKEN)",
+    )
+    parser.add_argument(
+        "--scorer-bin",
+        default=str(_DEFAULT_SCORER_BIN),
+        help=(
+            "python interpreter that can import dgmh.patina_judge "
+            f"(default: {_DEFAULT_SCORER_BIN})"
+        ),
+    )
     args = parser.parse_args()
 
     webhook = _resolve_webhook(args)
@@ -306,6 +506,30 @@ def main() -> int:
     time.sleep(args.interval_s)
 
     rows = _scan_log(Path(args.log_path).expanduser(), started_at, prompts)
+
+    # Score path — fetch actual reply text via Discord REST API then
+    # call score_humanness. Skipped when --no-score or token absent.
+    if not args.no_score and rows:
+        bot_token = args.bot_token or _resolve_env_value(
+            args.webhook_env, ("DISCORD_TOKEN", "DISCORD_BOT_TOKEN")
+        )
+        if not bot_token:
+            print(
+                "  (no DISCORD_TOKEN — skipping response fetch + scoring)",
+                file=sys.stderr,
+            )
+        else:
+            if not args.quiet:
+                print("  fetching reply text via Discord REST...")
+            bot_user_id = _resolve_bot_user_id(bot_token)
+            _attach_response_text(rows, bot_token, bot_user_id)
+            scorer_bin = Path(args.scorer_bin).expanduser()
+            if not args.quiet:
+                print(f"  scoring {len(rows)} responses with {scorer_bin}")
+            for r in rows:
+                text = r.get("response_text") or ""
+                r.update(_score_text(text, scorer_bin))
+
     _emit_table(rows, total_sent=len(prompts))
 
     if args.output:
