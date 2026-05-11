@@ -533,11 +533,26 @@ def _wrap_send(adapter: Any) -> None:
             structural_hit, struct_flags = _structural_pollution_check(content)
             if structural_hit:
                 try:
-                    from dgmh.patina_judge import humanness_rewrite
-
-                    rewritten = await asyncio.to_thread(
-                        humanness_rewrite, content, timeout_s=60.0
+                    from dgmh.patina_judge import (
+                        humanness_rewrite,
+                        humanness_rewrite_with_profile,
                     )
+
+                    # DGM-H: route 1:1 structural rewrite through the same
+                    # patina-profile path the public-mode rewrite uses so
+                    # DGMH_PATINA_PROFILE (e.g., casual-conversation) is
+                    # honored on both surfaces. Fall back to the simpler
+                    # Codex-direct humanness_rewrite when patina returns None.
+                    rewritten = await asyncio.to_thread(
+                        humanness_rewrite_with_profile,
+                        content,
+                        backend="codex-cli",
+                        timeout_s=30.0,
+                    )
+                    if rewritten is None:
+                        rewritten = await asyncio.to_thread(
+                            humanness_rewrite, content, timeout_s=60.0
+                        )
                     if rewritten and rewritten != content:
                         # Sanity: don't replace if rewrite still has pollution.
                         rew_hit, _ = _structural_pollution_check(rewritten)
