@@ -22,6 +22,30 @@ logger = logging.getLogger(__name__)
 _ASYNC_SHUTDOWN = object()
 
 
+def _resolve_public_mirror_channel(session_key: str) -> str | None:
+    """Return the public Discord channel_id encoded in ``session_key`` if any.
+
+    The DGM-H Discord mirror writes channel-wide history into the
+    ``discord-public-{channel_id}`` Honcho session, but the agent's
+    per-turn session_key has the form
+    ``agent-main-discord-group-{channel_id}-{user_id}`` (after gateway
+    sanitization). To pull mirror context into the agent's recent_messages,
+    we need to recognize that the current session belongs to one of the
+    configured public channels and extract its id.
+
+    Returns the channel_id string when the session_key contains a channel
+    listed in ``DGMH_PUBLIC_CHANNELS``; otherwise None (private 1:1 or
+    non-public channels keep the per-user context untouched).
+    """
+    raw = os.environ.get("DGMH_PUBLIC_CHANNELS", "")
+    if not raw or not session_key:
+        return None
+    for ch in (c.strip() for c in raw.split(",")):
+        if ch and ch in session_key:
+            return ch
+    return None
+
+
 @dataclass
 class HonchoSession:
     """
@@ -673,6 +697,45 @@ class HonchoSessionManager:
                         ]
         except Exception as e:
             logger.debug("Failed to fetch session summary from Honcho: %s", e)
+
+        # DGM-H: also surface channel-wide ambient context for public-mode.
+        # The agent's per-user session only sees that user's turns, so
+        # cross-user channel chatter is invisible without this merge.
+        # honcho_hook mirrors every channel message into the
+        # `discord-public-{channel_id}` session; pull from there and
+        # dedupe-merge with the per-user list above.
+        if os.environ.get("DGMH_HONCHO_INJECT_RECENT"):
+            try:
+                mirror_channel = _resolve_public_mirror_channel(session_key)
+                if mirror_channel:
+                    mirror_session_id = f"discord-public-{mirror_channel}"
+                    mirror_ctx = self._honcho.session(mirror_session_id).context(
+                        summary=False
+                    )
+                    mirror_msgs = getattr(mirror_ctx, "messages", None) or []
+                    if mirror_msgs:
+                        existing = result.get("recent_messages", []) or []
+                        seen = {(m.get("role"), m.get("content")) for m in existing}
+                        merged = list(existing)
+                        for m in mirror_msgs[-15:]:
+                            item = {
+                                "role": getattr(m, "peer_id", "unknown"),
+                                "content": (getattr(m, "content", None) or "")[:500],
+                            }
+                            key_t = (item["role"], item["content"])
+                            if key_t in seen:
+                                continue
+                            seen.add(key_t)
+                            merged.append(item)
+                        result["recent_messages"] = merged[-15:]
+                        logger.info(
+                            "[honcho] public-mode mirror merge: channel=%s mirror_msgs=%d total_recent=%d",
+                            mirror_channel,
+                            len(mirror_msgs),
+                            len(result["recent_messages"]),
+                        )
+            except Exception as e:
+                logger.debug("Failed to fetch mirror channel context: %s", e)
 
         try:
             user_ctx = self._fetch_peer_context(session.user_peer_id, search_query=user_message or None, target=session.user_peer_id)
