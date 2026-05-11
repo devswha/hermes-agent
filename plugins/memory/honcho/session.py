@@ -702,14 +702,22 @@ class HonchoSessionManager:
         # The agent's per-user session only sees that user's turns, so
         # cross-user channel chatter is invisible without this merge.
         # honcho_hook mirrors every channel message into the
-        # `discord-public-{channel_id}` session; pull from there and
-        # dedupe-merge with the per-user list above.
+        # `discord-public-{channel_id}` session of the dgmh-flask workspace;
+        # pull from there and dedupe-merge with the per-user list above.
         if os.environ.get("DGMH_HONCHO_INJECT_RECENT"):
             try:
                 mirror_channel = _resolve_public_mirror_channel(session_key)
                 if mirror_channel:
                     mirror_session_id = f"discord-public-{mirror_channel}"
-                    mirror_ctx = self._honcho.session(mirror_session_id).context(
+                    # Use the DGM-H workspace client — the hermes-builtin
+                    # workspace ("hermes") does not see the dgmh-flask
+                    # mirror writes.
+                    from dgmh.honcho_client import get_client as _dgmh_get_client
+
+                    dgmh_client = _dgmh_get_client()
+                    if dgmh_client is None:
+                        raise RuntimeError("dgmh honcho client unavailable")
+                    mirror_ctx = dgmh_client.session(mirror_session_id).context(
                         summary=False
                     )
                     mirror_msgs = getattr(mirror_ctx, "messages", None) or []

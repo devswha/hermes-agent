@@ -227,11 +227,10 @@ def _wrap_on_message(adapter: Any) -> None:
         logger.info("[honcho_hook] on_message already patched")
         return
 
-    listeners = getattr(client, "_listeners", None)
-    # discord.py keeps registered listeners in _listeners or via dispatch.
-    # Easier path: register an additional listener that runs alongside the
-    # existing on_message; discord.py supports multiple listeners per event.
-    @client.event
+    # discord.py supports multiple listeners per event via add_listener;
+    # @client.event would only setattr on the client (it derives the event
+    # name from the function name, so a custom-named handler never gets
+    # dispatched — silently disabling the inbound mirror).
     async def on_message_honcho_mirror(message):  # type: ignore[unused-ignore]
         try:
             if _is_disabled():
@@ -276,6 +275,7 @@ def _wrap_on_message(adapter: Any) -> None:
         except Exception:
             logger.exception("[honcho_hook] on_message mirror failed")
 
+    client.add_listener(on_message_honcho_mirror, "on_message")
     setattr(client, _PATCH_FLAG_MSG, True)
     logger.info("[honcho_hook] registered on_message mirror listener")
 
