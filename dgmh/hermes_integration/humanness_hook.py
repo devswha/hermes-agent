@@ -600,6 +600,24 @@ def _wrap_send(adapter: Any) -> None:
                         "[humanness_hook] pre-send rewrite failed; using original"
                     )
 
+        # Deterministic inline-backtick strip. patina is a probabilistic
+        # rewriter — it cannot be the sole line of defense against an AI-
+        # tone signal the project has decided is always wrong in casual
+        # chat. Decorative `…` ticks are unconditionally stripped here so
+        # the outbound surface carries the project's guarantee, not the
+        # rewriter's best effort. The regex matches single-backtick pairs
+        # on the same line only, so fenced code blocks survive intact.
+        if "`" in content:
+            scrubbed = _INLINE_BACKTICK_RE.sub(r"\1", content)
+            if scrubbed != content:
+                logger.info(
+                    "[humanness_hook] inline-backtick scrub applied "
+                    "(len=%d→%d)",
+                    len(content),
+                    len(scrubbed),
+                )
+                content = scrubbed
+
         # Pre-send length gate (skill-backed, with in-process fallback). Final
         # length enforcement after patina rewrite to honor SOUL.md 1-2 sentence
         # cap. Handles both public and 1:1 paths uniformly.

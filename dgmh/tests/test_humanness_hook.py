@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from dgmh.hermes_integration.humanness_hook import (
+    _INLINE_BACKTICK_RE,
     _prune_polluting_message,
     _should_score,
     _structural_pollution_check,
@@ -144,6 +145,43 @@ class TestStructuralPollutionCheck(unittest.TestCase):
         # Casual chat naturally uses one or two "같아"/"보여" — don't punish that.
         hit, flags = _structural_pollution_check("그쪽이 맞는 것 같아.")
         self.assertFalse(any(f.startswith("hedge-softener") for f in flags))
+
+
+class TestInlineBacktickStrip(unittest.TestCase):
+    """The deterministic post-rewrite strip used in wrapped_send.
+
+    Patina is probabilistic and sometimes preserves decorative ticks
+    even when prompted to remove them. Strip them via this regex as the
+    project's hard guarantee, independent of profile behavior.
+    """
+
+    def test_single_pair_stripped(self) -> None:
+        out = _INLINE_BACKTICK_RE.sub(r"\1", "오늘은 `2026-05-11 월요일 KST`.")
+        self.assertEqual(out, "오늘은 2026-05-11 월요일 KST.")
+
+    def test_multiple_pairs_all_stripped(self) -> None:
+        text = (
+            "도커는 `honcho-api`, `honcho-deriver`, `honcho-redis`, "
+            "`honcho-database`, `flask-postgres` 떠 있어."
+        )
+        out = _INLINE_BACKTICK_RE.sub(r"\1", text)
+        self.assertNotIn("`", out)
+        self.assertIn("honcho-api", out)
+        self.assertIn("flask-postgres", out)
+
+    def test_noop_when_no_ticks(self) -> None:
+        text = "백틱 없는 평범한 문장이야."
+        out = _INLINE_BACKTICK_RE.sub(r"\1", text)
+        self.assertEqual(out, text)
+
+    def test_does_not_collapse_across_newlines(self) -> None:
+        # The regex is line-bounded to keep fenced-block semantics. An
+        # opening tick on one line and a closing tick on another must
+        # not be treated as a single pair.
+        text = "첫 줄 `start\n끝 줄에서` 닫힘"
+        out = _INLINE_BACKTICK_RE.sub(r"\1", text)
+        # No same-line pair → no substitution happens.
+        self.assertEqual(out, text)
 
 
 class TestPruneLogic(unittest.TestCase):
