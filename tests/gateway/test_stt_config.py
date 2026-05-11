@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 
-from gateway.config import GatewayConfig, Platform, load_gateway_config
+from gateway.config import GatewayConfig, Platform, PlatformConfig, load_gateway_config
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
@@ -114,3 +114,109 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
     assert result is not None
     assert "queued voice transcript" in result
     assert "voice message" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_prepare_inbound_mixed_media_uses_per_attachment_mime_type():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    runner.adapters = {}
+    runner._model = "openai/gpt-4.1-mini"
+    runner._base_url = None
+    runner._decide_image_input_mode = lambda: "native"
+    runner._has_setup_skill = lambda: False
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="1496735735078715542",
+        chat_type="group",
+        user_id="1487083003946729542",
+        user_name="쿠마",
+        is_bot=True,
+    )
+    event = MessageEvent(
+        text="[image: neutral_smile] [voice: un] <@1496771171151253636>",
+        message_type=MessageType.PHOTO,
+        source=source,
+        media_urls=["/tmp/neutral_smile.png", "/tmp/un.wav"],
+        media_types=["image/png", "audio/x-wav"],
+    )
+
+    with patch.dict("os.environ", {"DGMH_PUBLIC_BOT_TEXT_ONLY": "0"}, clear=False):
+        with patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={
+                "success": True,
+                "transcript": "voice transcript",
+                "provider": "local_command",
+            },
+        ):
+            result = await runner._prepare_inbound_message_text(
+                event=event,
+                source=source,
+                history=[],
+            )
+
+    assert result is not None
+    assert "voice transcript" in result
+    pending = runner._consume_pending_native_image_paths(
+        runner._session_key_for_source(source)
+    )
+    assert pending == ["/tmp/neutral_smile.png"]
+
+
+@pytest.mark.asyncio
+async def test_public_discord_bot_peer_media_is_text_only_by_default():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        stt_enabled=True,
+        platforms={Platform.DISCORD: PlatformConfig(enabled=True, token="fake")},
+    )
+    runner.adapters = {}
+    runner._model = "openai/gpt-4.1-mini"
+    runner._base_url = None
+    runner._decide_image_input_mode = lambda: (_ for _ in ()).throw(
+        AssertionError("public bot media should not reach image routing")
+    )
+    runner._has_setup_skill = lambda: False
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="1496735735078715542",
+        chat_type="group",
+        user_id="1487083003946729542",
+        user_name="쿠마",
+        is_bot=True,
+    )
+    event = MessageEvent(
+        text="[image: neutral_smile] [voice: un] <@1496771171151253636>",
+        message_type=MessageType.PHOTO,
+        source=source,
+        media_urls=["/tmp/neutral_smile.png", "/tmp/un.wav"],
+        media_types=["image/png", "audio/x-wav"],
+    )
+
+    with patch.dict(
+        "os.environ",
+        {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"},
+        clear=False,
+    ):
+        with patch(
+            "tools.transcription_tools.transcribe_audio",
+            side_effect=AssertionError("public bot audio should not be transcribed"),
+        ):
+            result = await runner._prepare_inbound_message_text(
+                event=event,
+                source=source,
+                history=[],
+            )
+
+    assert result is not None
+    assert "[쿠마]" in result
+    assert runner._consume_pending_native_image_paths(
+        runner._session_key_for_source(source)
+    ) == []

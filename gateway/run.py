@@ -636,6 +636,7 @@ from gateway.session import (
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    is_configured_shared_group_channel,
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
@@ -1667,7 +1668,51 @@ class GatewayRunner:
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            config=config,
         )
+
+    @staticmethod
+    def _public_bot_text_only_enabled() -> bool:
+        """Whether public Discord bot peers should be ingested as text only."""
+        return is_truthy_value(os.getenv("DGMH_PUBLIC_BOT_TEXT_ONLY"), default=True)
+
+    def _is_public_bot_text_only_source(self, source: SessionSource) -> bool:
+        """Return True for configured public Discord room messages authored by bots."""
+        if not self._public_bot_text_only_enabled():
+            return False
+        if getattr(source, "platform", None) != Platform.DISCORD:
+            return False
+        if not getattr(source, "is_bot", False):
+            return False
+        try:
+            return is_configured_shared_group_channel(
+                source,
+                config=getattr(self, "config", None),
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _public_runtime_status_suppression_enabled() -> bool:
+        """Whether public Discord rooms hide runtime/status/tool-progress bubbles."""
+        return is_truthy_value(
+            os.getenv("DGMH_PUBLIC_SUPPRESS_RUNTIME_STATUS"),
+            default=True,
+        )
+
+    def _should_suppress_public_runtime_message(self, source: SessionSource) -> bool:
+        """Return True when runtime-only messages should not be sent to chat."""
+        if not self._public_runtime_status_suppression_enabled():
+            return False
+        if getattr(source, "platform", None) != Platform.DISCORD:
+            return False
+        try:
+            return is_configured_shared_group_channel(
+                source,
+                config=getattr(self, "config", None),
+            )
+        except Exception:
+            return False
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
@@ -6720,18 +6765,43 @@ class GatewayRunner:
             source,
             group_sessions_per_user=_group_sessions_per_user,
             thread_sessions_per_user=_thread_sessions_per_user,
+            config=getattr(self, "config", None),
         )
         if _is_shared_multi_user and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
 
-        if event.media_urls:
+        media_urls = list(getattr(event, "media_urls", None) or [])
+        media_types = list(getattr(event, "media_types", None) or [])
+        if media_urls and self._is_public_bot_text_only_source(source):
+            logger.info(
+                "Public Discord bot peer text-only mode: ignoring %d media attachment(s) "
+                "for chat=%s user=%s media_types=%s",
+                len(media_urls),
+                source.chat_id,
+                source.user_id,
+                media_types,
+            )
+            media_urls = []
+            media_types = []
+
+        if media_urls:
             image_paths = []
             audio_paths = []
-            for i, path in enumerate(event.media_urls):
-                mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
+            for i, path in enumerate(media_urls):
+                mtype = (media_types[i] if i < len(media_types) else "") or ""
+                mtype = str(mtype).lower()
+                if mtype:
+                    is_image = mtype.startswith("image/")
+                    is_audio = mtype.startswith("audio/")
+                else:
+                    is_image = event.message_type == MessageType.PHOTO
+                    is_audio = event.message_type in (
+                        MessageType.VOICE,
+                        MessageType.AUDIO,
+                    )
+                if is_image:
                     image_paths.append(path)
-                if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                if is_audio:
                     audio_paths.append(path)
 
             if image_paths:
@@ -6793,13 +6863,13 @@ class GatewayRunner:
                         except Exception:
                             pass
 
-        if event.media_urls and event.message_type == MessageType.DOCUMENT:
+        if media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
             from tools.credential_files import to_agent_visible_cache_path
 
             _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
-            for i, path in enumerate(event.media_urls):
-                mtype = event.media_types[i] if i < len(event.media_types) else ""
+            for i, path in enumerate(media_urls):
+                mtype = media_types[i] if i < len(media_types) else ""
                 if mtype in ("", "application/octet-stream"):
                     _ext = os.path.splitext(path)[1].lower()
                     if _ext in _TEXT_EXTENSIONS:
@@ -13445,6 +13515,12 @@ class GatewayRunner:
             out["tools.registry_generation"] = getattr(registry, "_generation", None)
         except Exception:
             out["tools.registry_generation"] = None
+        try:
+            from agent.prompt_builder import flask_wiki_signature
+
+            out["flask_wiki.signature"] = flask_wiki_signature()
+        except Exception:
+            out["flask_wiki.signature"] = None
         return out
 
     @staticmethod
@@ -14264,17 +14340,28 @@ class GatewayRunner:
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
-        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        _suppress_public_runtime_messages = self._should_suppress_public_runtime_message(source)
+        tool_progress_enabled = (
+            progress_mode != "off"
+            and source.platform != Platform.WEBHOOK
+            and not _suppress_public_runtime_messages
+        )
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
         interim_assistant_messages_enabled = (
             source.platform != Platform.WEBHOOK
+            and not _suppress_public_runtime_messages
             and is_truthy_value(
                 display_config.get("interim_assistant_messages"),
                 default=True,
             )
         )
+        if _suppress_public_runtime_messages:
+            logger.info(
+                "Suppressing runtime status/tool progress for public Discord channel %s",
+                source.chat_id,
+            )
         
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if tool_progress_enabled else None
@@ -14697,6 +14784,13 @@ class GatewayRunner:
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
+            if _suppress_public_runtime_messages:
+                logger.info(
+                    "Suppressed public runtime status (%s): %s",
+                    event_type,
+                    (message or "")[:120],
+                )
+                return
             try:
                 _fut = asyncio.run_coroutine_threadsafe(
                     _status_adapter.send(
@@ -14969,6 +15063,12 @@ class GatewayRunner:
 
             def _deliver_bg_review_message(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
+                    return
+                if _suppress_public_runtime_messages:
+                    logger.info(
+                        "Suppressed public background review message: %s",
+                        (message or "")[:120],
+                    )
                     return
                 try:
                     asyncio.run_coroutine_threadsafe(
