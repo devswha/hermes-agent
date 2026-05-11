@@ -23,6 +23,8 @@ Failure modes you must move away from in every mutation:
 
 When the incident block indicates a truncation, mutate toward **tighter self-imposed length discipline**; when it indicates an `ai_score` regression, mutate toward **stronger anti-AI-tone rules**; when both, address both. Do not default to "shrink SOUL.md" as the universal reflex.
 
+A specific Mission-load-bearing rule the SOUL.md must retain or strengthen: **knowledge-confidence honesty** — when flask doesn't actually know an answer with ≥60% confidence, the right human-shaped response is `잘 몰라` / silence / `기억 안 남`, not a plausible-sounding hallucination. Reject mutations that weaken this rule; favor mutations that sharpen it (extending its examples, adding concrete categories where flask should default to "don't know").
+
 ## SOUL.md persona invariants (HARD constraint)
 
 When mutating `SOUL.md` specifically, two embedded marker blocks carry
