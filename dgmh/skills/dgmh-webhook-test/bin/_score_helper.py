@@ -20,61 +20,38 @@ if _HERMES_ROOT.exists() and str(_HERMES_ROOT) not in sys.path:
     sys.path.insert(0, str(_HERMES_ROOT))
 
 
+def _emit(payload: dict) -> int:
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+def _emit_failure(reason: str) -> int:
+    return _emit(
+        {"ai_score": None, "human_likeness": None, "score_error": reason}
+    )
+
+
 def main() -> int:
     text = sys.stdin.read()
     try:
         from dgmh.patina_judge import PatinaScoreError, score_humanness
     except Exception as e:
-        print(
-            json.dumps(
-                {
-                    "ai_score": None,
-                    "human_likeness": None,
-                    "score_error": f"import failed: {type(e).__name__}: {e}",
-                },
-                ensure_ascii=False,
-            )
-        )
-        return 0
+        return _emit_failure(f"import failed: {type(e).__name__}: {e}")
 
     try:
         result = score_humanness(text, lang="ko")
     except PatinaScoreError as e:
-        print(
-            json.dumps(
-                {
-                    "ai_score": None,
-                    "human_likeness": None,
-                    "score_error": f"PatinaScoreError: {e}",
-                },
-                ensure_ascii=False,
-            )
-        )
-        return 0
+        return _emit_failure(f"PatinaScoreError: {e}")
     except Exception as e:
-        print(
-            json.dumps(
-                {
-                    "ai_score": None,
-                    "human_likeness": None,
-                    "score_error": f"{type(e).__name__}: {e}",
-                },
-                ensure_ascii=False,
-            )
-        )
-        return 0
+        return _emit_failure(f"{type(e).__name__}: {e}")
 
-    print(
-        json.dumps(
-            {
-                "ai_score": result.ai_score,
-                "human_likeness": result.human_likeness,
-                "interpretation": getattr(result, "interpretation", None),
-            },
-            ensure_ascii=False,
-        )
+    return _emit(
+        {
+            "ai_score": result.ai_score,
+            "human_likeness": result.human_likeness,
+            "interpretation": getattr(result, "interpretation", None),
+        }
     )
-    return 0
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
 
 _MISSION_HEAD = "# Mission"
@@ -96,15 +98,11 @@ class TestSoulMdSkipBehavior(unittest.TestCase):
 
     def test_skip_when_soul_md_missing(self) -> None:
         # Point HERMES_HOME at a tmp dir that has no SOUL.md.
-        from tempfile import TemporaryDirectory
-
-        with TemporaryDirectory() as tmp:
-            os.environ["HERMES_HOME"] = tmp
-            try:
-                with self.assertRaises(unittest.SkipTest):
-                    _read_or_skip(self)
-            finally:
-                os.environ.pop("HERMES_HOME", None)
+        with TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tmp}
+        ):
+            with self.assertRaises(unittest.SkipTest):
+                _read_or_skip(self)
 
 
 class TestSoulMdDeletionDetection(unittest.TestCase):
@@ -113,27 +111,23 @@ class TestSoulMdDeletionDetection(unittest.TestCase):
     """
 
     def test_missing_mission_would_fail(self) -> None:
-        from tempfile import TemporaryDirectory
-
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tmp}
+        ):
             (Path(tmp) / "SOUL.md").write_text(
                 "---\nname: flask\n---\n\nYou are flask.\n", encoding="utf-8"
             )
-            os.environ["HERMES_HOME"] = tmp
-            try:
-                text = _read_or_skip(self)
-                matches = [
-                    line
-                    for line in text.splitlines()
-                    if line.strip().startswith(_MISSION_HEAD)
-                ]
-                self.assertEqual(
-                    len(matches),
-                    0,
-                    msg="seed file should not contain the Mission header",
-                )
-            finally:
-                os.environ.pop("HERMES_HOME", None)
+            text = _read_or_skip(self)
+            matches = [
+                line
+                for line in text.splitlines()
+                if line.strip().startswith(_MISSION_HEAD)
+            ]
+            self.assertEqual(
+                len(matches),
+                0,
+                msg="seed file should not contain the Mission header",
+            )
 
 
 if __name__ == "__main__":
