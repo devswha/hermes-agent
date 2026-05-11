@@ -1,0 +1,8 @@
+name: dgmh-ai-callout
+description: "DGM-H #5 — observe other bots' inbound messages and optionally call out AI-shaped replies"
+events:
+  - gateway:startup
+# Lower than humanness (100) so wrap-order assertions on adapter.send
+# remain unaffected — this hook touches on_message via add_listener,
+# not adapter.send.
+priority: 50
