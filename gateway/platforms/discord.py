@@ -719,14 +719,35 @@ class DiscordAdapter(BasePlatformAdapter):
                 # permitted by DISCORD_ALLOW_BOTS are not rejected for
                 # not being in DISCORD_ALLOWED_USERS (fixes #4466).
                 if getattr(message.author, "bot", False):
+                    # DGM-H: DGMH_ALLOWED_BOT_USERS is a comma-separated
+                    # whitelist of bot user IDs that bypass the global
+                    # DISCORD_ALLOW_BOTS filter — lets the operator opt
+                    # specific friendly bots (e.g. 쿠마) into the normal
+                    # reply pipeline without flipping DISCORD_ALLOW_BOTS
+                    # to "all" and accidentally accepting every system bot.
+                    _dgmh_bot_allow_raw = os.getenv(
+                        "DGMH_ALLOWED_BOT_USERS", ""
+                    ).strip()
+                    _dgmh_bot_allow = (
+                        {x.strip() for x in _dgmh_bot_allow_raw.split(",") if x.strip()}
+                        if _dgmh_bot_allow_raw
+                        else set()
+                    )
+                    _author_id_str = str(getattr(message.author, "id", ""))
+                    _dgmh_bot_pass = bool(
+                        _author_id_str and _author_id_str in _dgmh_bot_allow
+                    )
+
                     allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
-                    if allow_bots == "none":
-                        return
-                    elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                    if not _dgmh_bot_pass:
+                        if allow_bots == "none":
                             return
-                    # "all" falls through; bot is permitted — skip the
-                    # human-user allowlist below (bots aren't in it).
+                        elif allow_bots == "mentions":
+                            if not self._client.user or self._client.user not in message.mentions:
+                                return
+                    # "all" or DGM-H whitelist falls through; bot is
+                    # permitted — skip the human-user allowlist below
+                    # (bots aren't in it).
                 else:
                     # Non-bot: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
