@@ -279,6 +279,19 @@ class TestExtractCacheBustingConfig:
 
         assert out["tools.registry_generation"] == 12345
 
+    def test_extract_includes_flask_wiki_signature(self, monkeypatch, tmp_path):
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        wiki_dir = tmp_path / "hermes_home" / "flask_wiki"
+        wiki_dir.mkdir(parents=True)
+        (wiki_dir / "00-index.md").write_text("cache key", encoding="utf-8")
+
+        out = GatewayRunner._extract_cache_busting_config({})
+
+        assert out["flask_wiki.signature"]
+        assert out["flask_wiki.signature"] != "missing"
+
     def test_full_round_trip_busts_cache_on_real_edit(self):
         """End-to-end: simulate a config edit on main and verify the
         extracted cache_keys change produces a new signature."""

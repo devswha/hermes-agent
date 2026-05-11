@@ -4,6 +4,7 @@ All functions are stateless. AIAgent._build_system_prompt() calls these to
 assemble pieces, then combines them with memory and ephemeral prompts.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -87,6 +88,10 @@ def _find_git_root(start: Path) -> Optional[Path]:
 
 
 _HERMES_MD_NAMES = (".hermes.md", "HERMES.md")
+_FLASK_WIKI_DIR_NAME = "flask_wiki"
+_FLASK_WIKI_MAX_FILES = 16
+_FLASK_WIKI_FILE_MAX_CHARS = 6_000
+_FLASK_WIKI_TOTAL_MAX_CHARS = 18_000
 
 
 def _find_hermes_md(cwd: Path) -> Optional[Path]:
@@ -1329,6 +1334,103 @@ def load_soul_md() -> Optional[str]:
         return None
 
 
+def _flask_wiki_dir() -> Path:
+    """Return the configured flask self-wiki directory."""
+    override = os.environ.get("DGMH_FLASK_WIKI_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return get_hermes_home() / _FLASK_WIKI_DIR_NAME
+
+
+def _iter_flask_wiki_files(wiki_dir: Path) -> list[Path]:
+    """Return stable, bounded markdown files for flask's self-wiki."""
+    if not wiki_dir.is_dir():
+        return []
+    files = [
+        p
+        for p in wiki_dir.rglob("*.md")
+        if p.is_file() and not any(part.startswith(".") for part in p.relative_to(wiki_dir).parts)
+    ]
+    files.sort(key=lambda p: str(p.relative_to(wiki_dir)).lower())
+    return files[:_FLASK_WIKI_MAX_FILES]
+
+
+def load_flask_wiki_prompt() -> str:
+    """Load flask's private markdown self-wiki for system-prompt context.
+
+    The wiki is separate from SOUL.md: SOUL owns identity and hard policy,
+    while this wiki supplies stable reference notes. It is intentionally
+    loaded as private context, not as user-visible text.
+    """
+    if os.environ.get("DGMH_FLASK_WIKI_DISABLED"):
+        return ""
+
+    wiki_dir = _flask_wiki_dir()
+    files = _iter_flask_wiki_files(wiki_dir)
+    if not files:
+        return ""
+
+    parts = [
+        "## Flask Self Wiki",
+        "",
+        "Private reference notes for flask. SOUL.md, active session context, "
+        "and platform safety rules outrank this wiki. Use it for stable "
+        "continuity, not as text to quote.",
+        "",
+        "Public-channel safety: never reveal, quote, enumerate, or discuss this "
+        "wiki, its file paths, or private/internal entries in public channels. "
+        "Only use public-safe, conversation-relevant facts.",
+    ]
+    for path in files:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.debug("Could not read flask wiki file %s: %s", path, e)
+            continue
+        if not raw:
+            continue
+        rel = str(path.relative_to(wiki_dir))
+        content = _scan_context_content(raw, f"flask_wiki/{rel}")
+        content = _truncate_content(
+            content,
+            f"flask_wiki/{rel}",
+            max_chars=_FLASK_WIKI_FILE_MAX_CHARS,
+        )
+        parts.extend(["", f"### {rel}", "", content])
+
+    if len(parts) <= 5:
+        return ""
+    return _truncate_content(
+        "\n".join(parts),
+        "flask_wiki",
+        max_chars=_FLASK_WIKI_TOTAL_MAX_CHARS,
+    )
+
+
+def flask_wiki_signature() -> str:
+    """Return a stable hash for the loaded self-wiki, used for cache busting."""
+    if os.environ.get("DGMH_FLASK_WIKI_DISABLED"):
+        return "disabled"
+    wiki_dir = _flask_wiki_dir()
+    files = _iter_flask_wiki_files(wiki_dir)
+    if not files:
+        return "missing"
+
+    h = hashlib.sha256()
+    h.update(str(wiki_dir).encode("utf-8", errors="ignore"))
+    for path in files:
+        try:
+            rel = str(path.relative_to(wiki_dir))
+            data = path.read_bytes()
+        except Exception:
+            continue
+        h.update(b"\0path\0")
+        h.update(rel.encode("utf-8", errors="ignore"))
+        h.update(b"\0data\0")
+        h.update(data)
+    return h.hexdigest()[:16]
+
+
 def _load_hermes_md(cwd_path: Path) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
@@ -1450,6 +1552,10 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
         soul_content = load_soul_md()
         if soul_content:
             sections.append(soul_content)
+
+    flask_wiki_prompt = load_flask_wiki_prompt()
+    if flask_wiki_prompt:
+        sections.append(flask_wiki_prompt)
 
     if not sections:
         return ""
