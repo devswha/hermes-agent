@@ -93,11 +93,62 @@ _INLINE_BACKTICK_RE = re.compile(r"`([^`\n]{1,80})`")
 # \"**제목:**\" header-style pattern); this catches word-level decoration
 # patina sometimes leaves behind when it preserves a quoted title.
 _INLINE_BOLD_RE = re.compile(r"\*\*([^*\n]{1,80})\*\*")
+_TONE_METADATA_LINE_RE = re.compile(
+    r"^\s*(?:tone|tone_source|tone_evidence|tone_confidence)\s*:",
+    re.IGNORECASE,
+)
+_TONE_METADATA_TAIL_RE = re.compile(
+    r"\s*---\s*(?:\n\s*)?tone\s*:[\s\S]*$",
+    re.IGNORECASE,
+)
+_PUBLIC_TOOL_PROGRESS_PREFIXES = (
+    "📚",
+    "💻",
+    "🔍",
+    "⚙️",
+    "🛠️",
+    "🧠",
+    "📖",
+    "🌐",
+)
+_PUBLIC_RUNTIME_NOISE_PREFIXES = (
+    "⚠️",
+    "❌",
+    "Error:",
+    "[error]",
+    "지금 하던 작업 잠깐 멈췄어요",
+)
+_SELF_EVOLUTION_PRESENT_RE = re.compile(
+    r"(자체\s*진화|자기\s*발전|진화\s*중|수정\s*중|손보는\s*중|코드[^\n]{0,12}손보)",
+    re.IGNORECASE,
+)
 # Operator-flagged hedge softeners ("…같아", "…보여", "…는 듯", "…는 느낌").
 # A single occurrence isn't AI-tone; three or more in one response reads as
 # the LLM hedging every clause to stay safe.
 _HEDGE_SOFTENER_RE = re.compile(
     r"(?:같아요?|같음|보여요?|보임|보이는데|느낌|느낌이야|느낌임|듯해요?|듯함)(?=[\s.,!?…]|$)"
+)
+_POLITE_REGISTER_ENDING_RE = re.compile(
+    r"(?:요|죠|네요|네여|습니다|습니까|슴다|읍니다|용|여)[.!?…~ㅋㅎㅠㅜ]*(?=$|\s)"
+)
+_BANMAL_REGISTER_ENDING_RE = re.compile(
+    r"(?:야|해|할게|좋아|맞아|몰라|있어|없어|가자|보자|하자|돼|아냐|아니야)"
+    r"[.!?…~ㅋㅎㅠㅜ]*(?=$|\s)"
+)
+_PUBLIC_BANMAL_ENDING_FIXES = (
+    (re.compile(r"괜찮아(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"괜찮아요\g<suffix>"),
+    (re.compile(r"아니야(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"아니에요\g<suffix>"),
+    (re.compile(r"아냐(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"아니에요\g<suffix>"),
+    (re.compile(r"좋아(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"좋아요\g<suffix>"),
+    (re.compile(r"맞아(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"맞아요\g<suffix>"),
+    (re.compile(r"몰라(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"몰라요\g<suffix>"),
+    (re.compile(r"있어(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"있어요\g<suffix>"),
+    (re.compile(r"없어(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"없어요\g<suffix>"),
+    (re.compile(r"할게(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"할게요\g<suffix>"),
+    (re.compile(r"갈게(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"갈게요\g<suffix>"),
+    (re.compile(r"볼게(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"볼게요\g<suffix>"),
+    (re.compile(r"해줘(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"해주세요\g<suffix>"),
+    (re.compile(r"돼(?P<suffix>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"돼요\g<suffix>"),
 )
 
 # Unprompted bio-recitation. The operator already knows the bot is their
@@ -120,6 +171,75 @@ _BIO_RECITATION_TOKENS = (
     "evolve via DGM-H",
     "feedback-driven self",
 )
+
+
+def _strip_internal_metadata_blocks(content: str) -> str:
+    """Remove patina/tone metadata accidentally appended to user-visible text."""
+    text = str(content or "")
+    text = _TONE_METADATA_TAIL_RE.sub("", text).rstrip()
+    if not text:
+        return ""
+
+    kept: list[str] = []
+    for line in text.splitlines():
+        if _TONE_METADATA_LINE_RE.match(line):
+            break
+        kept.append(line)
+    return "\n".join(kept).rstrip()
+
+
+def _is_public_runtime_noise(content: str) -> bool:
+    """Return True for runtime/status/tool-progress frames not meant for public chat."""
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if any(text.startswith(prefix) for prefix in _PUBLIC_RUNTIME_NOISE_PREFIXES):
+        return True
+    if any(token in text for token in ("Non-retryable error", "BadRequestError", "HTTP 400")):
+        return True
+    if "skill_view:" in text or "💻 terminal:" in text:
+        return True
+    first_line = text.splitlines()[0]
+    return any(first_line.startswith(prefix) for prefix in _PUBLIC_TOOL_PROGRESS_PREFIXES) and ":" in first_line
+
+
+def _sanitize_public_outbound(content: str) -> str:
+    """Apply deterministic public-room safety cleanup before Discord send."""
+    text = _strip_internal_metadata_blocks(content)
+    if _is_public_runtime_noise(text):
+        return ""
+    return text.strip()
+
+
+def _apply_self_evolution_notice(
+    content: str,
+    *,
+    is_public_channel: bool,
+) -> str:
+    """Prefix public replies with the self-evolution disclosure when active."""
+    text = str(content or "").strip()
+    if not is_public_channel or not text:
+        return text
+    try:
+        from dgmh.self_evolution_status import get_self_evolution_notice
+
+        notice = get_self_evolution_notice()
+    except Exception:
+        logger.exception("[humanness_hook] self-evolution notice lookup failed")
+        return text
+    if not notice:
+        return text
+    if notice in text or _SELF_EVOLUTION_PRESENT_RE.search(text):
+        return text
+    return f"{notice} {text}"
+
+
+def _normalize_public_haeyo_register(content: str) -> str:
+    """Conservatively convert common sentence-final 반말 endings for public chat."""
+    text = str(content or "")
+    for pattern, replacement in _PUBLIC_BANMAL_ENDING_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
@@ -177,6 +297,11 @@ def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     if len(softener_hits) >= 3:
         flags.append(f"hedge-softener({len(softener_hits)})")
 
+    if _POLITE_REGISTER_ENDING_RE.search(
+        stripped
+    ) and _BANMAL_REGISTER_ENDING_RE.search(stripped):
+        flags.append("mixed-register")
+
     return (bool(flags), flags)
 
 
@@ -193,7 +318,7 @@ def _read_soul_hash() -> str:
 
 
 async def _patina_rewrite_dispatch(
-    content: str, *, timeout_s: float = 30.0
+    content: str, *, timeout_s: float = 30.0, register_mode: str = "mirror"
 ) -> Optional[str]:
     """Pick between dynamic (kakao-mimic-rag) and static patina profiles.
 
@@ -218,6 +343,7 @@ async def _patina_rewrite_dispatch(
                 content,
                 backend="codex-cli",
                 timeout_s=timeout_s,
+                register_mode=register_mode,
             )
         except Exception:
             logger.exception(
@@ -550,6 +676,17 @@ def _wrap_send(adapter: Any) -> None:
         reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ):
+        def _suppressed_result(reason: str):
+            try:
+                from gateway.platforms.base import SendResult
+
+                return SendResult(
+                    success=True,
+                    raw_response={"suppressed_by": reason},
+                )
+            except Exception:
+                return {"success": True, "suppressed_by": reason}
+
         # Pre-send rewrite. Step 4 (v3) splits the rewrite path by channel:
         #
         #   public + DGMH_PUBLIC_HUMAN_MODE=1
@@ -565,16 +702,39 @@ def _wrap_send(adapter: Any) -> None:
         )
 
         is_public_mode = False
+        is_public_channel_send = False
         try:
             from dgmh.honcho_client import is_public_channel
 
+            is_public_channel_send = is_public_channel(str(chat_id))
             is_public_mode = (
-                _public_human_mode_enabled() and is_public_channel(str(chat_id))
+                _public_human_mode_enabled() and is_public_channel_send
             )
         except Exception:
             logger.exception(
                 "[humanness_hook] public-mode resolver failed; defaulting off"
             )
+
+        if is_public_channel_send:
+            sanitized = _sanitize_public_outbound(content)
+            if sanitized != content:
+                logger.info(
+                    "[humanness_hook] public outbound sanitizer applied "
+                    "(len=%d→%d)",
+                    len(content or ""),
+                    len(sanitized),
+                )
+                content = sanitized
+            if not content.strip():
+                try:
+                    from dgmh.honcho_client import set_post_rewrite_content
+
+                    set_post_rewrite_content("")
+                except Exception:
+                    logger.exception(
+                        "[humanness_hook] could not publish suppressed public content"
+                    )
+                return _suppressed_result("dgmh_public_sanitizer")
 
         # DGM-H W1 dedup flag — true once patina has produced a usable
         # rewrite this turn, so the downstream gate can skip its own
@@ -591,7 +751,11 @@ def _wrap_send(adapter: Any) -> None:
                 # Dispatcher picks RAG profile (kakao-mimic-rag) vs static
                 # based on DGMH_PATINA_PROFILE env; both end up invoking
                 # patina with --profile <name>.
-                rewritten = await _patina_rewrite_dispatch(content, timeout_s=30.0)
+                rewritten = await _patina_rewrite_dispatch(
+                    content,
+                    timeout_s=30.0,
+                    register_mode="public_haeyo",
+                )
                 if rewritten is None:
                     # D8 fallback: Codex-direct prompt as a safety net.
                     rewritten = await asyncio.to_thread(
@@ -683,6 +847,17 @@ def _wrap_send(adapter: Any) -> None:
                 )
                 content = scrubbed
 
+        if is_public_channel_send:
+            normalized = _normalize_public_haeyo_register(content)
+            if normalized != content:
+                logger.info(
+                    "[humanness_hook] public register normalizer applied "
+                    "(len=%d→%d)",
+                    len(content),
+                    len(normalized),
+                )
+                content = normalized
+
         # Pre-send length gate (skill-backed, with in-process fallback). Final
         # length enforcement after patina rewrite to honor SOUL.md 1-2 sentence
         # cap. Handles both public and 1:1 paths uniformly.
@@ -690,11 +865,11 @@ def _wrap_send(adapter: Any) -> None:
         _gate_in_len: int = len(content)
         _gate_out_len: int = len(content)
         try:
-            from dgmh.hermes_integration.pre_send_gate import gate as _length_gate
+            from dgmh.hermes_integration.pre_send_gate import gate_async as _length_gate
             from dgmh.honcho_client import channel_kind_for as _channel_kind_for
 
             _kind = _channel_kind_for(str(chat_id))
-            _decision, _new_content = _length_gate(
+            _decision, _new_content = await _length_gate(
                 content,
                 channel_kind=_kind,
                 pre_rewritten=_pre_rewritten,
@@ -710,6 +885,23 @@ def _wrap_send(adapter: Any) -> None:
                 content = _new_content
         except Exception:
             logger.exception("[humanness_hook] length gate failed; using rewrite output as-is")
+
+        if is_public_channel_send:
+            sanitized = _sanitize_public_outbound(content)
+            content = _apply_self_evolution_notice(
+                sanitized,
+                is_public_channel=True,
+            )
+            if not content.strip():
+                try:
+                    from dgmh.honcho_client import set_post_rewrite_content
+
+                    set_post_rewrite_content("")
+                except Exception:
+                    logger.exception(
+                        "[humanness_hook] could not publish suppressed public content"
+                    )
+                return _suppressed_result("dgmh_public_sanitizer")
 
         # Step 4 stage 7 (v3): publish the post-rewrite content into the
         # ContextVar so the outer honcho wrapper mirrors the FINAL outbound

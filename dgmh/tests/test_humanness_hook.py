@@ -9,6 +9,10 @@ from unittest import mock
 from dgmh.hermes_integration.humanness_hook import (
     _INLINE_BACKTICK_RE,
     _INLINE_BOLD_RE,
+    _apply_self_evolution_notice,
+    _normalize_public_haeyo_register,
+    _sanitize_public_outbound,
+    _strip_internal_metadata_blocks,
     _prune_polluting_message,
     _should_score,
     _structural_pollution_check,
@@ -88,6 +92,21 @@ class TestStructuralPollutionCheck(unittest.TestCase):
         )
         self.assertFalse(hit)
 
+    def test_mixed_register_flags(self) -> None:
+        hit, flags = _structural_pollution_check("오 좋네요. 그건 맞아.")
+        self.assertTrue(hit)
+        self.assertIn("mixed-register", flags)
+
+    def test_single_register_banmal_does_not_flag_as_mixed(self) -> None:
+        hit, flags = _structural_pollution_check("응 그쪽이지. 검증이 더 중요해.")
+        self.assertFalse(hit)
+        self.assertNotIn("mixed-register", flags)
+
+    def test_single_register_haeyo_does_not_flag_as_mixed(self) -> None:
+        hit, flags = _structural_pollution_check("오 좋아요. 그쪽이 맞네요.")
+        self.assertFalse(hit)
+        self.assertNotIn("mixed-register", flags)
+
     def test_2_bullets_ok(self) -> None:
         hit, _ = _structural_pollution_check("두 가지:\n- A\n- B")
         self.assertFalse(hit)
@@ -146,6 +165,18 @@ class TestStructuralPollutionCheck(unittest.TestCase):
         # Casual chat naturally uses one or two "같아"/"보여" — don't punish that.
         hit, flags = _structural_pollution_check("그쪽이 맞는 것 같아.")
         self.assertFalse(any(f.startswith("hedge-softener") for f in flags))
+
+
+class TestPublicRegisterNormalizer(unittest.TestCase):
+    def test_converts_common_sentence_final_banmal_to_haeyo(self) -> None:
+        got = _normalize_public_haeyo_register("오 좋아 ㅋㅋ 그건 맞아.")
+
+        self.assertEqual(got, "오 좋아요 ㅋㅋ 그건 맞아요.")
+
+    def test_leaves_existing_haeyo_unchanged(self) -> None:
+        got = _normalize_public_haeyo_register("오 좋아요 ㅋㅋ 그건 맞네요.")
+
+        self.assertEqual(got, "오 좋아요 ㅋㅋ 그건 맞네요.")
 
 
 class TestInlineBacktickStrip(unittest.TestCase):
@@ -221,6 +252,68 @@ class TestInlineBoldDetectionAndStrip(unittest.TestCase):
         text = "x*y 곱하기 결과"
         out = _INLINE_BOLD_RE.sub(r"\1", text)
         self.assertEqual(out, text)
+
+
+class TestPublicOutboundSanitizer(unittest.TestCase):
+    def test_strips_tone_metadata_tail(self) -> None:
+        text = (
+            "이미지 파일이 꼬인 듯해.\n"
+            "---\n"
+            "tone: null\n"
+            "tone_source: profile_only\n"
+            "tone_evidence: []\n"
+            "---"
+        )
+        self.assertEqual(
+            _strip_internal_metadata_blocks(text),
+            "이미지 파일이 꼬인 듯해.",
+        )
+
+    def test_suppresses_runtime_error_frame(self) -> None:
+        self.assertEqual(
+            _sanitize_public_outbound(
+                "⚠️ Non-retryable error (HTTP 400) — trying fallback..."
+            ),
+            "",
+        )
+
+    def test_suppresses_tool_progress_frame(self) -> None:
+        self.assertEqual(
+            _sanitize_public_outbound(
+                '📚 skill_view: "hermes-agent"\n💻 terminal: "grep -R tone_source"'
+            ),
+            "",
+        )
+
+    def test_self_evolution_notice_prefixed_when_active(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DGMH_SELF_EVOLVING": "1",
+                "DGMH_SELF_EVOLUTION_NOTICE": "지금 자체진화 중이에요.",
+            },
+        ):
+            out = _apply_self_evolution_notice(
+                "오 좋아요, 30분 정도면 충분해요.",
+                is_public_channel=True,
+            )
+
+        self.assertTrue(out.startswith("지금 자체진화 중이에요."))
+
+    def test_self_evolution_notice_not_duplicated(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DGMH_SELF_EVOLVING": "1",
+                "DGMH_SELF_EVOLUTION_NOTICE": "지금 자체진화 중이에요.",
+            },
+        ):
+            out = _apply_self_evolution_notice(
+                "지금 자체진화 중이에요. 오 좋아요.",
+                is_public_channel=True,
+            )
+
+        self.assertEqual(out, "지금 자체진화 중이에요. 오 좋아요.")
 
 
 class TestPruneLogic(unittest.TestCase):
