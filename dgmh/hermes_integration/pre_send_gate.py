@@ -14,6 +14,7 @@ Output decisions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -235,3 +236,30 @@ def gate(
         decision, len(content or ""), len(out_content or ""), reason,
     )
     return decision, out_content
+
+
+async def gate_async(
+    content: str,
+    *,
+    channel_kind: str = "public",
+    max_chars: int | None = None,
+    timeout_s: float = 35.0,
+    skill_bin: str | None = None,
+    pre_rewritten: bool = False,
+) -> tuple[str, str]:
+    """Async wrapper for :func:`gate` that never blocks the event loop.
+
+    The skill-backed branch may run a subprocess for up to ``timeout_s``. When
+    called from Discord's async send pipeline, doing that inline can block the
+    gateway heartbeat and force reconnects. Keep the synchronous API for tests
+    and non-async callers, but offload gateway use through ``asyncio.to_thread``.
+    """
+    return await asyncio.to_thread(
+        gate,
+        content,
+        channel_kind=channel_kind,
+        max_chars=max_chars,
+        timeout_s=timeout_s,
+        skill_bin=skill_bin,
+        pre_rewritten=pre_rewritten,
+    )

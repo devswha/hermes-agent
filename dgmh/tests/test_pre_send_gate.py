@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import unittest
+import asyncio
 from unittest import mock
 
 from dgmh.hermes_integration import pre_send_gate as gate_mod
@@ -14,6 +16,7 @@ from dgmh.hermes_integration.pre_send_gate import (
     _resolve_max_chars,
     _truncate_at_sentence,
     gate,
+    gate_async,
 )
 
 
@@ -231,6 +234,22 @@ class TestGateNoSkillNeeded(unittest.TestCase):
             decision, out = gate(content, channel_kind="public", skill_bin=_REAL_SKILL_BIN)
         self.assertEqual(decision, "send")
         self.assertEqual(len(out), 200)
+
+
+class TestGateAsync(unittest.TestCase):
+    def test_gate_async_offloads_to_worker_thread(self) -> None:
+        main_thread = threading.get_ident()
+
+        def fake_gate(*args, **kwargs):
+            return "send", str(threading.get_ident())
+
+        async def run():
+            with mock.patch.object(gate_mod, "gate", side_effect=fake_gate):
+                return await gate_async("hello", channel_kind="public")
+
+        decision, worker_thread = asyncio.run(run())
+        self.assertEqual(decision, "send")
+        self.assertNotEqual(int(worker_thread), main_thread)
 
 
 class TestFallbackTruncate(unittest.TestCase):
