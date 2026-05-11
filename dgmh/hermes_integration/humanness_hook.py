@@ -88,6 +88,11 @@ _CLOSING_HEDGE_RE = re.compile(
 # Fenced code blocks are stripped before this runs, so this only catches
 # the inline `…` form.
 _INLINE_BACKTICK_RE = re.compile(r"`([^`\n]{1,80})`")
+# Markdown bold emphasis on casual single-word phrases — \"**삼체**\" /
+# \"**원피스 실사**\". Distinct from _BOLD_LABEL_RE (which matches the
+# \"**제목:**\" header-style pattern); this catches word-level decoration
+# patina sometimes leaves behind when it preserves a quoted title.
+_INLINE_BOLD_RE = re.compile(r"\*\*([^*\n]{1,80})\*\*")
 # Operator-flagged hedge softeners ("…같아", "…보여", "…는 듯", "…는 느낌").
 # A single occurrence isn't AI-tone; three or more in one response reads as
 # the LLM hedging every clause to stay safe.
@@ -159,6 +164,13 @@ def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     if len(inline_ticks) >= 2 or (inline_ticks and len(stripped) < 150):
         flags.append(f"inline-backtick({len(inline_ticks)})")
 
+    # Word-level **bold** decoration (titles, brand names). Distinct from
+    # the label-style **xx:** check above. Any occurrence in casual chat
+    # is AI-tone.
+    inline_bolds = _INLINE_BOLD_RE.findall(stripped)
+    if inline_bolds:
+        flags.append(f"inline-bold({len(inline_bolds)})")
+
     # Hedge softener pileup — 3+ "같아/보여/듯" in one response = LLM
     # over-hedging.
     softener_hits = _HEDGE_SOFTENER_RE.findall(stripped)
@@ -178,6 +190,60 @@ def _read_soul_hash() -> str:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
     except Exception:
         return ""
+
+
+async def _patina_rewrite_dispatch(
+    content: str, *, timeout_s: float = 30.0
+) -> Optional[str]:
+    """Pick between dynamic (kakao-mimic-rag) and static patina profiles.
+
+    When ``DGMH_PATINA_PROFILE`` is ``kakao-mimic-rag``, build a per-call
+    patina profile from TF-IDF-retrieved corpus anchors. Returns the
+    rewritten text on success. The static-profile path is the steady
+    state; the RAG path is the new Phase 2 surface that retrieves
+    draft-specific voice anchors on every turn.
+
+    Returns ``None`` on any failure path so the caller can decide
+    whether to defer to the simpler Codex-direct rewrite.
+    """
+    from dgmh.patina_judge import humanness_rewrite_with_profile
+
+    profile_env = (os.environ.get("DGMH_PATINA_PROFILE", "") or "").strip()
+    if profile_env == "kakao-mimic-rag":
+        try:
+            from dgmh.kakao_style_retrieval import rewrite_with_rag_profile
+
+            rewritten = await asyncio.to_thread(
+                rewrite_with_rag_profile,
+                content,
+                backend="codex-cli",
+                timeout_s=timeout_s,
+            )
+        except Exception:
+            logger.exception(
+                "[humanness_hook] RAG profile path raised; "
+                "falling back to static kakao-mimic"
+            )
+            rewritten = None
+        if rewritten is not None:
+            return rewritten
+        # RAG returned None (no anchors / patina error). Fall through
+        # to the static kakao-mimic profile so we still get *some*
+        # voice mirroring instead of original content.
+        return await asyncio.to_thread(
+            humanness_rewrite_with_profile,
+            content,
+            profile="kakao-mimic",
+            backend="codex-cli",
+            timeout_s=timeout_s,
+        )
+
+    return await asyncio.to_thread(
+        humanness_rewrite_with_profile,
+        content,
+        backend="codex-cli",
+        timeout_s=timeout_s,
+    )
 
 
 def _should_score(content: str) -> bool:
@@ -520,20 +586,12 @@ def _wrap_send(adapter: Any) -> None:
             # Always attempts a rewrite, structural pollution or not — the
             # social profile is responsible for amplifying voice traits.
             try:
-                from dgmh.patina_judge import (
-                    humanness_rewrite,
-                    humanness_rewrite_with_profile,
-                )
+                from dgmh.patina_judge import humanness_rewrite
 
-                # profile=None → resolve from DGMH_PATINA_PROFILE env (default
-                # "social"). Lets the operator A/B-test profiles via
-                # `systemctl --user set-environment DGMH_PATINA_PROFILE=...`.
-                rewritten = await asyncio.to_thread(
-                    humanness_rewrite_with_profile,
-                    content,
-                    backend="codex-cli",
-                    timeout_s=30.0,
-                )
+                # Dispatcher picks RAG profile (kakao-mimic-rag) vs static
+                # based on DGMH_PATINA_PROFILE env; both end up invoking
+                # patina with --profile <name>.
+                rewritten = await _patina_rewrite_dispatch(content, timeout_s=30.0)
                 if rewritten is None:
                     # D8 fallback: Codex-direct prompt as a safety net.
                     rewritten = await asyncio.to_thread(
@@ -556,21 +614,13 @@ def _wrap_send(adapter: Any) -> None:
             structural_hit, struct_flags = _structural_pollution_check(content)
             if structural_hit:
                 try:
-                    from dgmh.patina_judge import (
-                        humanness_rewrite,
-                        humanness_rewrite_with_profile,
-                    )
+                    from dgmh.patina_judge import humanness_rewrite
 
-                    # DGM-H: route 1:1 structural rewrite through the same
-                    # patina-profile path the public-mode rewrite uses so
-                    # DGMH_PATINA_PROFILE (e.g., casual-conversation) is
-                    # honored on both surfaces. Fall back to the simpler
-                    # Codex-direct humanness_rewrite when patina returns None.
-                    rewritten = await asyncio.to_thread(
-                        humanness_rewrite_with_profile,
-                        content,
-                        backend="codex-cli",
-                        timeout_s=30.0,
+                    # Dispatcher honors DGMH_PATINA_PROFILE — including the
+                    # Phase 2 kakao-mimic-rag profile that runs per-turn
+                    # corpus retrieval before invoking patina.
+                    rewritten = await _patina_rewrite_dispatch(
+                        content, timeout_s=30.0
                     )
                     if rewritten is None:
                         rewritten = await asyncio.to_thread(
@@ -612,6 +662,21 @@ def _wrap_send(adapter: Any) -> None:
             if scrubbed != content:
                 logger.info(
                     "[humanness_hook] inline-backtick scrub applied "
+                    "(len=%d→%d)",
+                    len(content),
+                    len(scrubbed),
+                )
+                content = scrubbed
+
+        # Same guarantee for **bold** word decoration. patina's profile
+        # rules ask it to suppress markdown bold but it sometimes leaves
+        # quoted titles (e.g., **삼체**) intact. Strip the markers; keep
+        # the content.
+        if "**" in content:
+            scrubbed = _INLINE_BOLD_RE.sub(r"\1", content)
+            if scrubbed != content:
+                logger.info(
+                    "[humanness_hook] inline-bold scrub applied "
                     "(len=%d→%d)",
                     len(content),
                     len(scrubbed),

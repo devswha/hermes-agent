@@ -8,6 +8,7 @@ from unittest import mock
 
 from dgmh.hermes_integration.humanness_hook import (
     _INLINE_BACKTICK_RE,
+    _INLINE_BOLD_RE,
     _prune_polluting_message,
     _should_score,
     _structural_pollution_check,
@@ -181,6 +182,44 @@ class TestInlineBacktickStrip(unittest.TestCase):
         text = "첫 줄 `start\n끝 줄에서` 닫힘"
         out = _INLINE_BACKTICK_RE.sub(r"\1", text)
         # No same-line pair → no substitution happens.
+        self.assertEqual(out, text)
+
+
+class TestInlineBoldDetectionAndStrip(unittest.TestCase):
+    """Word-level **bold** patina sometimes leaves on titles/brand names."""
+
+    def test_pollution_flag_fires_on_single_bold(self) -> None:
+        hit, flags = _structural_pollution_check("취향 모르면 **삼체** 추천.")
+        self.assertTrue(hit)
+        self.assertTrue(any(f.startswith("inline-bold") for f in flags))
+
+    def test_pollution_flag_counts_multiple_bolds(self) -> None:
+        text = "**삼체** 보고 가볍게는 **원피스 실사**, 세면 **베이비 레인디어**."
+        hit, flags = _structural_pollution_check(text)
+        self.assertTrue(hit)
+        # Three bolds expected
+        bold_flags = [f for f in flags if f.startswith("inline-bold")]
+        self.assertEqual(bold_flags, ["inline-bold(3)"])
+
+    def test_strip_keeps_content(self) -> None:
+        out = _INLINE_BOLD_RE.sub(r"\1", "취향 모르면 **삼체** 추천.")
+        self.assertEqual(out, "취향 모르면 삼체 추천.")
+
+    def test_strip_multiple_keeps_all_titles(self) -> None:
+        text = "**삼체**랑 **원피스 실사** 둘 다 볼만함"
+        out = _INLINE_BOLD_RE.sub(r"\1", text)
+        self.assertEqual(out, "삼체랑 원피스 실사 둘 다 볼만함")
+
+    def test_noop_when_no_bold(self) -> None:
+        text = "그냥 평범한 문장이야"
+        out = _INLINE_BOLD_RE.sub(r"\1", text)
+        self.assertEqual(out, text)
+
+    def test_does_not_match_single_asterisks(self) -> None:
+        # Single * for italics is a different concern; this regex
+        # targets ** specifically to avoid mangling math/symbol uses.
+        text = "x*y 곱하기 결과"
+        out = _INLINE_BOLD_RE.sub(r"\1", text)
         self.assertEqual(out, text)
 
 
