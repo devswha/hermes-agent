@@ -303,6 +303,14 @@ class SoulEvolutionOpts:
     pos_reactions: int = 0
     neg_reactions: int = 1  # default: 1 negative triggered this cycle
 
+    # DGM-H W2 — incident block string the modifier substitutes into
+    # `{{INCIDENT_BLOCK}}` so it can mutate along the correct axis
+    # (e.g., "the operator 👎'd a message that was truncated mid-sentence
+    # by the 200-char gate" vs "the operator 👎'd a fully sent reply").
+    # Empty string substitutes to the default "(no incident details
+    # provided)" line in the template, preserving prior behavior.
+    incident_block: str = ""
+
     # Modifier and critic (injected for testing; None = use real ones)
     modifier: Any = None  # SkillModifier-compatible .modify(parent, archive)
     critic: Any = None    # SkillCritic-compatible .review(child, parent, archive)
@@ -403,19 +411,29 @@ def _build_soul_modifier() -> Any:
             """Produce a mutated SOUL.md candidate.
 
             parent.extra['soul_md_content'] contains the current SOUL.md text.
+            parent.extra['incident_block'] (optional) is substituted into the
+            modifier prompt's `{{INCIDENT_BLOCK}}` placeholder so the model
+            mutates along the correct axis (e.g., truncation vs content).
             """
             from dgmh.modifier import SkillCandidate
 
             parent_content = parent.extra.get("soul_md_content", "")
             parent_hash = parent.extra.get("soul_md_hash", _sha256(parent_content))
             parent_lineage = parent.extra.get("lineage", [])
+            incident_block = parent.extra.get("incident_block", "") or "(no incident details provided)"
 
-            # Build a synthetic prompt for SOUL.md mutation
-            prompt = _build_soul_modifier_prompt(parent_content, archive)
+            # Substitute {{INCIDENT_BLOCK}} in the template before handing
+            # it to the upstream skill-modifier, which only knows about
+            # {{PARENT_SKILL_MD}} / {{ARCHIVE_SUMMARY}} / {{ATTEMPT}}.
+            prompt_template_with_incident = _prompt_template.replace(
+                "{{INCIDENT_BLOCK}}", incident_block
+            )
 
             # Use SkillModifier for the actual LLM call, adapted for SOUL.md
             try:
-                raw_modifier = make_codex_skill_modifier(prompt_template=_prompt_template)
+                raw_modifier = make_codex_skill_modifier(
+                    prompt_template=prompt_template_with_incident,
+                )
                 # Create a synthetic parent Generation for skill modifier
                 synth_parent = Generation(
                     id=parent.id,
@@ -448,17 +466,6 @@ def _build_soul_modifier() -> Any:
                 ) from exc
 
     return SoulModifier()
-
-
-def _build_soul_modifier_prompt(parent_content: str, archive: Any) -> str:
-    """Build a mutation prompt for SOUL.md."""
-    return (
-        "You are mutating a bot's system prompt (SOUL.md). "
-        "The operator gave a negative reaction, signaling the current SOUL.md needs improvement. "
-        "Propose an improved version that better serves the operator's intent.\n\n"
-        f"CURRENT SOUL.md:\n{parent_content}\n\n"
-        "Produce an improved SOUL.md that addresses the implicit negative feedback."
-    )
 
 
 def _build_soul_critic() -> Any:
@@ -568,6 +575,7 @@ def run_soul_evolution(opts: SoulEvolutionOpts) -> bool:
             "soul_md_content": parent_content,
             "soul_md_hash": parent_hash,
             "lineage": parent_lineage,
+            "incident_block": opts.incident_block or "",
         },
     )
 

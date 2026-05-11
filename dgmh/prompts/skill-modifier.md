@@ -70,6 +70,16 @@ The parser extracts the first balanced `{ ... }` from your response.
 
 Outputs missing any required field, with `skill_id` not matching `<cat>/<name>` pattern, with empty `skill_md`, or violating self-mod scope, are rejected and you will be re-prompted (caller re-rolls up to `maxScopeAttempts`). After exhaustion the iteration fails.
 
+## Incident triggering this mutation
+
+The negative reaction that just landed has the following pipeline context. Treat this as the **primary signal** for the mutation axis — do not default to "make it shorter" if the incident says the reply was truncated or had wrong content along an orthogonal axis.
+
+```
+{{INCIDENT_BLOCK}}
+```
+
+When the incident says the reply was **truncated** (decision=compress, ends_in_ellipsis=true), the right mutation is usually to tighten *self-imposed* length discipline in SOUL.md (so the bot stops at the cap on its own), NOT to shrink SOUL.md itself. When the incident says decision=send (no truncation), the 👎 is about content/tone — mutate that axis instead.
+
 ## Mutation guidance
 
 You are sampling the modification space, not the answer space. Consider:
