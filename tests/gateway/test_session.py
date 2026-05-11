@@ -12,6 +12,7 @@ from gateway.session import (
     build_session_context_prompt,
     build_session_key,
     canonical_whatsapp_identifier,
+    is_configured_shared_group_channel,
 )
 
 # Legacy name preserved for these tests; product renamed the function to
@@ -408,6 +409,65 @@ class TestBuildSessionContextPrompt:
         assert "Multi-user session" in prompt
         assert "[sender name]" in prompt
         assert "**User:** Alice" not in prompt
+
+    def test_dgmh_public_discord_channel_is_shared_room_context(self):
+        """DGM-H public Discord channels should share one room transcript."""
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_name="Server / #에이전트대전",
+            chat_type="group",
+            user_id="266436073557590016",
+            user_name="하코",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            ctx = build_session_context(source, config)
+            prompt = build_session_context_prompt(ctx)
+
+        assert ctx.shared_multi_user_session is True
+        assert "Multi-user session" in prompt
+        assert "Public-channel reply contract" in prompt
+        assert "Public register is locked to Korean 해요체-casual" in prompt
+        assert "mirror another bot's 반말" in prompt
+        assert "mix 반말 and 해요체" in prompt
+        assert "Do not reveal, mention, or quote Flask Self Wiki" in prompt
+        assert "**User:** 하코" not in prompt
+
+    def test_dgmh_public_prompt_discloses_self_evolution_when_active(self):
+        """Public prompt should tell flask to disclose active self-development."""
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_name="Server / #에이전트대전",
+            chat_type="group",
+            user_id="266436073557590016",
+            user_name="하코",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "DGMH_PUBLIC_CHANNELS": "1496735735078715542",
+                "DGMH_SELF_EVOLVING": "1",
+                "DGMH_SELF_EVOLUTION_NOTICE": "지금 자체진화 중이에요.",
+            },
+        ):
+            ctx = build_session_context(source, config)
+            prompt = build_session_context_prompt(ctx)
+
+        assert "Self-development status" in prompt
+        assert "지금 자체진화 중이에요." in prompt
 
     def test_dm_thread_shows_user_not_multi(self):
         """DM threads are single-user and should show User, not multi-user note."""
@@ -857,6 +917,37 @@ class TestWhatsAppSessionKeyConsistency:
         assert build_session_key(first) == "agent:main:discord:group:guild-123:alice"
         assert build_session_key(second) == "agent:main:discord:group:guild-123:bob"
         assert build_session_key(first) != build_session_key(second)
+
+    def test_dgmh_public_discord_groups_share_session_key(self):
+        first = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_type="group",
+            user_id="alice",
+        )
+        second = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_type="group",
+            user_id="bob",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            assert is_configured_shared_group_channel(first) is True
+            assert build_session_key(first) == "agent:main:discord:group:1496735735078715542"
+            assert build_session_key(second) == "agent:main:discord:group:1496735735078715542"
+
+    def test_dgmh_public_override_does_not_affect_non_public_discord_group(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            assert is_configured_shared_group_channel(source) is False
+            assert build_session_key(source) == "agent:main:discord:group:guild-123:alice"
 
     def test_group_sessions_can_be_shared_when_isolation_disabled(self):
         first = SessionSource(

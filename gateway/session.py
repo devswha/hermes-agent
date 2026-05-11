@@ -228,6 +228,101 @@ def _discord_tools_loaded() -> bool:
         return False
 
 
+def _split_csvish_ids(raw: object) -> set[str]:
+    """Normalize a comma-separated/list-like channel-id config value."""
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        items = raw
+    else:
+        items = str(raw).split(",")
+    return {str(item).strip() for item in items if str(item).strip()}
+
+
+def _platform_extra_for_source(config: object | None, source: "SessionSource") -> dict:
+    try:
+        platform_cfg = getattr(config, "platforms", {}).get(source.platform)
+        extra = getattr(platform_cfg, "extra", None)
+        return extra if isinstance(extra, dict) else {}
+    except Exception:
+        return {}
+
+
+def is_configured_shared_group_channel(
+    source: "SessionSource",
+    *,
+    config: object | None = None,
+    platform_extra: dict | None = None,
+) -> bool:
+    """Return True when this group/channel should use one shared room session.
+
+    Hermes keeps non-thread group sessions per-user by default, which is still
+    the safe default for generic group chats. DGM-H public Discord rooms are an
+    exception: participants expect one room-level conversation, not isolated
+    per-speaker transcripts. Support both a generic Hermes setting and the
+    DGM-H public-channel env so the runtime fix does not require turning off
+    isolation for every group chat.
+    """
+    if source.chat_type == "dm" or not source.chat_id:
+        return False
+    if source.thread_id:
+        return False
+
+    extras = (
+        platform_extra
+        if isinstance(platform_extra, dict)
+        else _platform_extra_for_source(config, source)
+    )
+    configured = set()
+    for key in (
+        "shared_group_session_channels",
+        "shared_group_channels",
+        "public_shared_channels",
+    ):
+        configured.update(_split_csvish_ids(extras.get(key)))
+    configured.update(_split_csvish_ids(os.environ.get("HERMES_SHARED_GROUP_SESSION_CHANNELS")))
+
+    # Local DGM-H integration: public Discord channels are room conversations.
+    if source.platform == Platform.DISCORD:
+        configured.update(_split_csvish_ids(os.environ.get("DGMH_PUBLIC_CHANNELS")))
+
+    return str(source.chat_id) in configured
+
+
+def effective_group_sessions_per_user(
+    source: "SessionSource",
+    *,
+    default: bool = True,
+    config: object | None = None,
+    platform_extra: dict | None = None,
+) -> bool:
+    """Resolve per-user isolation for this source after channel overrides."""
+    if not default:
+        return False
+    if is_configured_shared_group_channel(
+        source,
+        config=config,
+        platform_extra=platform_extra,
+    ):
+        return False
+    return True
+
+
+def _public_reply_model_max_chars() -> int:
+    raw = (
+        os.environ.get("DGMH_PUBLIC_MODEL_MAX_CHARS")
+        or os.environ.get("DGMH_PUBLIC_MAX_CHARS")
+        or ""
+    )
+    try:
+        parsed = int(raw)
+        if parsed > 0:
+            return parsed
+    except (TypeError, ValueError):
+        pass
+    return 180
+
+
 def build_session_context_prompt(
     context: SessionContext,
     *,
@@ -353,6 +448,36 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+
+        if is_configured_shared_group_channel(context.source):
+            lines.append("")
+            lines.append(
+                "**Public-channel reply contract:** This Discord channel is a "
+                "shared public multi-user room, not a private one-user thread. "
+                "Use the shared transcript and [sender name] prefixes as room "
+                "context. Final replies must be Korean, casual, 1-2 sentences, "
+                f"and <= {_public_reply_model_max_chars()} chars. Public "
+                "register is locked to Korean 해요체-casual: use ~요/~죠/"
+                "~네요/~슴다-style endings consistently. Do not switch into "
+                "반말, mirror another bot's 반말, or mix 반말 and 해요체 in one "
+                "reply. Do not reveal, mention, or quote Flask Self Wiki "
+                "entries, paths, or private/internal notes here. Do not use "
+                "bullets, headers, code blocks, long apologies, or self-analysis; "
+                "if the answer needs detail, give the short version and move the "
+                "detail to 1:1."
+            )
+            try:
+                from dgmh.self_evolution_status import get_self_evolution_notice
+
+                evolution_notice = get_self_evolution_notice()
+            except Exception:
+                evolution_notice = None
+            if evolution_notice:
+                lines.append(
+                    "**Self-development status:** "
+                    f"{evolution_notice} If you are mentioned or reply here, "
+                    "say this briefly in natural Korean before continuing."
+                )
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
@@ -575,6 +700,8 @@ def is_shared_multi_user_session(
     *,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    config: object | None = None,
+    platform_extra: dict | None = None,
 ) -> bool:
     """Return True when a non-DM session is shared across participants.
 
@@ -588,13 +715,21 @@ def is_shared_multi_user_session(
         return False
     if source.thread_id:
         return not thread_sessions_per_user
-    return not group_sessions_per_user
+    effective_group_isolation = effective_group_sessions_per_user(
+        source,
+        default=group_sessions_per_user,
+        config=config,
+        platform_extra=platform_extra,
+    )
+    return not effective_group_isolation
 
 
 def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    config: object | None = None,
+    platform_extra: dict | None = None,
 ) -> str:
     """Build a deterministic session key from a message source.
 
@@ -649,7 +784,12 @@ def build_session_key(
     # In threads, default to shared sessions (all participants see the same
     # conversation).  Per-user isolation only applies when explicitly enabled
     # via thread_sessions_per_user, or when there is no thread (regular group).
-    isolate_user = group_sessions_per_user
+    isolate_user = effective_group_sessions_per_user(
+        source,
+        default=group_sessions_per_user,
+        config=config,
+        platform_extra=platform_extra,
+    )
     if source.thread_id and not thread_sessions_per_user:
         isolate_user = False
 
@@ -741,6 +881,7 @@ class SessionStore:
             source,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            config=self.config,
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
@@ -1380,6 +1521,7 @@ def build_session_context(
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            config=config,
         ),
     )
     
