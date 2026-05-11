@@ -509,6 +509,32 @@ def _build_soul_critic() -> Any:
 
 
 def run_soul_evolution(opts: SoulEvolutionOpts) -> bool:
+    """Run one SOUL.md evolution cycle and expose active status while it runs."""
+    marked = False
+    try:
+        from dgmh.self_evolution_status import mark_self_evolution_active
+
+        mark_self_evolution_active(
+            reason="SOUL.md self-evolution",
+            source="soul_evolution",
+        )
+        marked = True
+    except Exception:
+        logger.exception("soul_evolution: could not mark active self-evolution")
+
+    try:
+        return _run_soul_evolution_impl(opts)
+    finally:
+        if marked:
+            try:
+                from dgmh.self_evolution_status import clear_self_evolution_active
+
+                clear_self_evolution_active(source="soul_evolution")
+            except Exception:
+                logger.exception("soul_evolution: could not clear self-evolution marker")
+
+
+def _run_soul_evolution_impl(opts: SoulEvolutionOpts) -> bool:
     """Run one SOUL.md evolution cycle triggered by a reaction.
 
     Steps:
