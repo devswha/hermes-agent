@@ -313,7 +313,7 @@ _REWRITE_PROFILE_DEFAULT_TIMEOUT_S = 30.0
 def humanness_rewrite_with_profile(
     text: str,
     *,
-    profile: str = "social",
+    profile: Optional[str] = None,
     backend: str = "codex-cli",
     lang: str = "ko",
     timeout_s: float = _REWRITE_PROFILE_DEFAULT_TIMEOUT_S,
@@ -332,7 +332,9 @@ def humanness_rewrite_with_profile(
 
     Args:
         text: Source Korean Discord reply.
-        profile: Patina profile. Default ``"social"`` for casual public chat.
+        profile: Patina profile. ``None`` (default) resolves from the
+            ``DGMH_PATINA_PROFILE`` env var, falling back to ``"social"``.
+            Pass an explicit string (e.g. ``"social"``) to override the env.
         backend: Patina LLM backend. Default ``"codex-cli"`` (free via Codex
             ChatGPT OAuth — no API key needed).
         lang: Language code passed to patina. Default ``"ko"``.
@@ -348,6 +350,11 @@ def humanness_rewrite_with_profile(
     """
     if not text or not text.strip():
         return None
+
+    if profile is None:
+        profile = (
+            os.environ.get("DGMH_PATINA_PROFILE", "social").strip() or "social"
+        )
 
     binary = patina_bin or os.environ.get("DGMH_PATINA_BIN", _DEFAULT_PATINA_BIN)
     if not Path(binary).exists():

@@ -497,10 +497,12 @@ def _wrap_send(adapter: Any) -> None:
                     humanness_rewrite_with_profile,
                 )
 
+                # profile=None → resolve from DGMH_PATINA_PROFILE env (default
+                # "social"). Lets the operator A/B-test profiles via
+                # `systemctl --user set-environment DGMH_PATINA_PROFILE=...`.
                 rewritten = await asyncio.to_thread(
                     humanness_rewrite_with_profile,
                     content,
-                    profile="social",
                     backend="codex-cli",
                     timeout_s=30.0,
                 )

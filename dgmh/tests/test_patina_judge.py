@@ -308,6 +308,73 @@ class TestHumannessRewriteWithProfile(unittest.TestCase):
         self.assertIn("다만 자세한 건 생각해봐야 해.", out or "")
         self.assertIn("응, 한번 해보자.", out or "")
 
+    def test_env_default_is_social(self) -> None:
+        """When DGMH_PATINA_PROFILE is unset and caller omits ``profile``,
+        the default profile passed to patina is ``social``."""
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "응 그쪽이지.\n"
+        completed.stderr = ""
+        env = {k: v for k, v in os.environ.items() if k != "DGMH_PATINA_PROFILE"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ) as run_mock, mock.patch(
+            "dgmh.patina_judge.Path.exists", return_value=True
+        ):
+            humanness_rewrite_with_profile(
+                "원본 텍스트", patina_bin="/fake/patina.js"
+            )
+        args = run_mock.call_args[0][0]
+        self.assertIn("--profile", args)
+        self.assertEqual(args[args.index("--profile") + 1], "social")
+
+    def test_env_override_picks_casual_conversation(self) -> None:
+        """``DGMH_PATINA_PROFILE=casual-conversation`` flips the live profile
+        when the caller does not pass ``profile`` explicitly."""
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "응 그쪽이지.\n"
+        completed.stderr = ""
+        with mock.patch.dict(
+            os.environ, {"DGMH_PATINA_PROFILE": "casual-conversation"}
+        ), mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ) as run_mock, mock.patch(
+            "dgmh.patina_judge.Path.exists", return_value=True
+        ):
+            humanness_rewrite_with_profile(
+                "원본 텍스트", patina_bin="/fake/patina.js"
+            )
+        args = run_mock.call_args[0][0]
+        self.assertIn("--profile", args)
+        self.assertEqual(
+            args[args.index("--profile") + 1], "casual-conversation"
+        )
+
+    def test_explicit_profile_overrides_env(self) -> None:
+        """When the caller passes ``profile="social"`` explicitly, the env
+        var is ignored — preserves existing test fixtures and lets specific
+        callers force a profile."""
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "응 그쪽이지.\n"
+        completed.stderr = ""
+        with mock.patch.dict(
+            os.environ, {"DGMH_PATINA_PROFILE": "casual-conversation"}
+        ), mock.patch(
+            "dgmh.patina_judge.subprocess.run", return_value=completed
+        ) as run_mock, mock.patch(
+            "dgmh.patina_judge.Path.exists", return_value=True
+        ):
+            humanness_rewrite_with_profile(
+                "원본 텍스트",
+                profile="social",
+                patina_bin="/fake/patina.js",
+            )
+        args = run_mock.call_args[0][0]
+        self.assertIn("--profile", args)
+        self.assertEqual(args[args.index("--profile") + 1], "social")
+
     def test_preamble_then_multi_paragraph_body(self) -> None:
         """Preamble dropped; both subsequent body paragraphs preserved."""
         preamble = "아직 AI 티 나는 부분: 없음."
