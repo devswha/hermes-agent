@@ -83,6 +83,17 @@ _COLON_INTRO_RE = re.compile(
 _CLOSING_HEDGE_RE = re.compile(
     r"(?:[.!?]\s+|\n\s*)(?:그래도|다만|물론|한편)\s+[^\n]+[.!?]?\s*$"
 )
+# Inline backtick decoration — AI text often wraps dates, status words, and
+# plain phrases in `…` for "formatting polish". Real casual chat doesn't.
+# Fenced code blocks are stripped before this runs, so this only catches
+# the inline `…` form.
+_INLINE_BACKTICK_RE = re.compile(r"`([^`\n]{1,80})`")
+# Operator-flagged hedge softeners ("…같아", "…보여", "…는 듯", "…는 느낌").
+# A single occurrence isn't AI-tone; three or more in one response reads as
+# the LLM hedging every clause to stay safe.
+_HEDGE_SOFTENER_RE = re.compile(
+    r"(?:같아요?|같음|보여요?|보임|보이는데|느낌|느낌이야|느낌임|듯해요?|듯함)(?=[\s.,!?…]|$)"
+)
 
 # Unprompted bio-recitation. The operator already knows the bot is their
 # personal assistant on Hermes Agent with DGM-H — repeating it in casual
@@ -141,6 +152,18 @@ def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     bio_hits = [t for t in _BIO_RECITATION_TOKENS if t in stripped]
     if len(bio_hits) >= 2:
         flags.append(f"bio-recitation({len(bio_hits)}:{','.join(bio_hits[:3])})")
+
+    # Inline backticks in casual chat — AI-tone signal. 2+ anywhere, or
+    # 1+ in short responses (<150 chars) where decoration stands out.
+    inline_ticks = _INLINE_BACKTICK_RE.findall(stripped)
+    if len(inline_ticks) >= 2 or (inline_ticks and len(stripped) < 150):
+        flags.append(f"inline-backtick({len(inline_ticks)})")
+
+    # Hedge softener pileup — 3+ "같아/보여/듯" in one response = LLM
+    # over-hedging.
+    softener_hits = _HEDGE_SOFTENER_RE.findall(stripped)
+    if len(softener_hits) >= 3:
+        flags.append(f"hedge-softener({len(softener_hits)})")
 
     return (bool(flags), flags)
 

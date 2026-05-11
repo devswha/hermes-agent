@@ -95,6 +95,56 @@ class TestStructuralPollutionCheck(unittest.TestCase):
         hit, flags = _structural_pollution_check(text)
         self.assertFalse(hit)
 
+    def test_inline_backtick_in_short_reply_flags(self) -> None:
+        # Decorating a casual one-liner with `…` is the operator-flagged
+        # AI-tone tell — real chat just says the date plainly.
+        hit, flags = _structural_pollution_check("오늘은 `2026-05-11 월요일 KST`.")
+        self.assertTrue(hit)
+        self.assertTrue(any(f.startswith("inline-backtick") for f in flags))
+
+    def test_two_inline_backticks_in_long_reply_flags(self) -> None:
+        text = (
+            "로드맵은 `CLI → Git → GitHub PR`까지 본 다음 `Docker → compose → 배포`로 "
+            "넘어가는 게 자연스러워. 정치는 제도 신뢰가 핵심 같음."
+        )
+        hit, flags = _structural_pollution_check(text)
+        self.assertTrue(hit)
+        self.assertTrue(any(f.startswith("inline-backtick") for f in flags))
+
+    def test_single_backtick_in_very_long_reply_passes(self) -> None:
+        # In long technical chat (200+ chars), a single inline tick is
+        # reasonable — don't false-positive every command name mention.
+        text = (
+            "어제 시도한 `npm install` 단계에서 멈춘 거 같은데, 의존성 잠금 파일을 다시 "
+            "보면 그쪽이 문제일 수도 있어. 일단 빌드까지 한 번 끝까지 돌려보고 "
+            "결과로 다시 얘기하는 게 더 빠르겠다. 내가 보기엔 그쪽 흐름이 자연스러워. "
+            "당장은 큰 영향 없을 거고 다음 PR에서 같이 가져가면 돼."
+        )
+        hit, flags = _structural_pollution_check(text)
+        self.assertFalse(any(f.startswith("inline-backtick") for f in flags))
+
+    def test_fenced_code_block_does_not_trigger_backtick_flag(self) -> None:
+        # Fenced code blocks are stripped before the inline check; only
+        # decoration ticks should count, not legitimate multi-line code.
+        text = "예시:\n```python\nprint(x)\n```\n쓰면 되긴 해."
+        hit, flags = _structural_pollution_check(text)
+        self.assertFalse(any(f.startswith("inline-backtick") for f in flags))
+
+    def test_hedge_softener_pileup_flags(self) -> None:
+        # Three or more "…같아 / …보여 / …듯" in one response = over-hedging.
+        text = (
+            "양당 피로감이 크게 느껴지는 것 같아. 대안 세력은 설득력이 약해 보여. "
+            "정권 심판보다는 정치 품질 저하가 더 커 보이는 듯해."
+        )
+        hit, flags = _structural_pollution_check(text)
+        self.assertTrue(hit)
+        self.assertTrue(any(f.startswith("hedge-softener") for f in flags))
+
+    def test_single_hedge_softener_passes(self) -> None:
+        # Casual chat naturally uses one or two "같아"/"보여" — don't punish that.
+        hit, flags = _structural_pollution_check("그쪽이 맞는 것 같아.")
+        self.assertFalse(any(f.startswith("hedge-softener") for f in flags))
+
 
 class TestPruneLogic(unittest.TestCase):
     """End-to-end test of _prune_polluting_message against a temp state.db."""
