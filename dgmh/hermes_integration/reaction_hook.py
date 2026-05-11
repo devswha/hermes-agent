@@ -198,10 +198,46 @@ def should_process_reaction(
 # ---------------------------------------------------------------------------
 
 
-async def _trigger_soul_evolution(classification: str, adapter: Any) -> None:
+def _build_incident_block(
+    classification: str,
+    emoji: str,
+    gate_decision: Any,
+) -> str:
+    """Render the gate-decision context as a human-readable block the
+    modifier prompt can substitute into `{{INCIDENT_BLOCK}}`. Keeps the
+    actual reacted-message text OUT of the block — only metadata, so
+    third-party content never enters the evolution prompt.
+    """
+    parts = [
+        f"classification: {classification}",
+        f"reaction_emoji: {emoji}",
+    ]
+    if gate_decision is None:
+        parts.append("gate_decision: unknown (no cached decision — likely pre-W3 message or cache eviction)")
+    else:
+        parts.append(f"gate_decision: {getattr(gate_decision, 'decision', '?')}")
+        parts.append(f"gate_in_len: {getattr(gate_decision, 'in_len', '?')}")
+        parts.append(f"gate_out_len: {getattr(gate_decision, 'out_len', '?')}")
+        parts.append(
+            f"ends_in_ellipsis: {bool(getattr(gate_decision, 'ends_in_ellipsis', False))}"
+        )
+        parts.append(
+            f"truncated: {bool(getattr(gate_decision, 'truncated', False))}"
+        )
+    return "\n".join(parts)
+
+
+async def _trigger_soul_evolution(
+    classification: str,
+    adapter: Any,
+    *,
+    incident_block: str = "",
+) -> None:
     """Trigger a SOUL.md evolution cycle on negative reaction.
 
-    Called only for 'negative' classifications that pass throttle check.
+    Called only for negative-class classifications that pass throttle.
+    `incident_block` carries the gate-decision context so the modifier
+    can mutate along the correct axis.
     """
     global _last_evolution_time
 
@@ -219,7 +255,7 @@ async def _trigger_soul_evolution(classification: str, adapter: Any) -> None:
 
     try:
         from dgmh.soul_evolution import run_soul_evolution, SoulEvolutionOpts
-        opts = SoulEvolutionOpts()
+        opts = SoulEvolutionOpts(incident_block=incident_block)
         # Run in executor to avoid blocking the Discord event loop
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_soul_evolution, opts)
@@ -318,23 +354,49 @@ async def _handle_reaction_event(payload: Any, adapter: Any) -> None:
         logger.debug("[reaction_hook] Error checking message author: %s", exc)
         return
 
-    # Classify emoji
+    # Classify emoji (3-class baseline). Negative reactions are refined
+    # below with the gate-decision context for that message — a 👎 on a
+    # truncated reply means something different from a 👎 on a fully sent
+    # reply (the operator may dislike the cut-off, not the content).
     classification = classify_emoji(emoji_str)
+
+    from dgmh.hermes_integration.gate_decisions import get_decision
+
+    gate_decision = get_decision(str(message_id))
+    if classification == "negative" and gate_decision is not None and gate_decision.truncated:
+        classification = "negative_truncated"
+
     logger.info(
-        "[reaction_hook] Reaction user=%d emoji=%s classification=%s",
+        "[reaction_hook] Reaction user=%d emoji=%s classification=%s gate=%s",
         reactor_user_id,
         emoji_str,
         classification,
+        gate_decision,
     )
 
     if classification == "positive":
         # Record positive reaction — no evolution triggered
-        _record_reaction(classification="positive", emoji=emoji_str)
+        _record_reaction(
+            classification="positive",
+            emoji=emoji_str,
+            gate_decision=gate_decision,
+        )
 
-    elif classification == "negative":
-        # Record negative reaction and trigger evolution
-        _record_reaction(classification="negative", emoji=emoji_str)
-        await _trigger_soul_evolution(classification, adapter)
+    elif classification in ("negative", "negative_truncated"):
+        # Record negative reaction and trigger evolution with gate context
+        _record_reaction(
+            classification=classification,
+            emoji=emoji_str,
+            gate_decision=gate_decision,
+        )
+        incident_block = _build_incident_block(
+            classification, emoji_str, gate_decision
+        )
+        await _trigger_soul_evolution(
+            classification,
+            adapter,
+            incident_block=incident_block,
+        )
 
     else:
         # Neutral — log but no action
@@ -343,18 +405,35 @@ async def _handle_reaction_event(payload: Any, adapter: Any) -> None:
         )
 
 
-def _record_reaction(classification: str, emoji: str) -> None:
-    """Append a reaction event to the dgmh log (non-blocking best-effort)."""
+def _record_reaction(
+    classification: str,
+    emoji: str,
+    *,
+    gate_decision: Any = None,
+) -> None:
+    """Append a reaction event to the dgmh log (non-blocking best-effort).
+
+    ``gate_decision`` is the GateDecision dataclass for the reacted-on
+    message when available; it gets flattened into the log row so the
+    evolution loop can attribute 👎 to truncation vs content.
+    """
     try:
         log_path = _hermes_home() / "dgmh" / "reaction_events.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         import datetime as _dt
 
-        entry = {
+        entry: dict[str, Any] = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "classification": classification,
             "emoji": emoji,
         }
+        if gate_decision is not None:
+            entry["gate_decision"] = getattr(gate_decision, "decision", None)
+            entry["gate_in_len"] = getattr(gate_decision, "in_len", None)
+            entry["gate_out_len"] = getattr(gate_decision, "out_len", None)
+            entry["gate_ends_in_ellipsis"] = getattr(
+                gate_decision, "ends_in_ellipsis", None
+            )
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as exc:

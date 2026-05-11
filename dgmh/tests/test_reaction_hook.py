@@ -222,7 +222,14 @@ class TestEvolutionTrigger:
         rh.reset_throttle()
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        # Use a fresh loop per call so Py3.11's deprecation of implicit
+        # get_event_loop() across xdist workers doesn't surface as
+        # "no current event loop" intermittently.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def test_negative_reaction_on_bot_message_triggers_evolution(self):
         """Negative reaction on bot's own message triggers exactly one evolution."""
@@ -245,7 +252,7 @@ class TestEvolutionTrigger:
 
         evolution_calls = []
 
-        async def fake_trigger(classification, adapter):
+        async def fake_trigger(classification, adapter, **kwargs):
             evolution_calls.append(classification)
 
         with patch.object(rh, "_trigger_soul_evolution", side_effect=fake_trigger):
@@ -274,7 +281,7 @@ class TestEvolutionTrigger:
 
         evolution_calls = []
 
-        async def fake_trigger(classification, adapter):
+        async def fake_trigger(classification, adapter, **kwargs):
             evolution_calls.append(classification)
 
         with patch.object(rh, "_trigger_soul_evolution", side_effect=fake_trigger):
@@ -302,7 +309,7 @@ class TestEvolutionTrigger:
 
         evolution_calls = []
 
-        async def fake_trigger(classification, adapter):
+        async def fake_trigger(classification, adapter, **kwargs):
             evolution_calls.append(classification)
 
         with patch.object(rh, "_trigger_soul_evolution", side_effect=fake_trigger):
@@ -322,7 +329,7 @@ class TestEvolutionTrigger:
 
         evolution_calls = []
 
-        async def fake_trigger(classification, adapter):
+        async def fake_trigger(classification, adapter, **kwargs):
             evolution_calls.append(classification)
 
         with patch.object(rh, "_trigger_soul_evolution", side_effect=fake_trigger):
@@ -350,7 +357,7 @@ class TestEvolutionTrigger:
 
         evolution_calls = []
 
-        async def fake_trigger(classification, adapter):
+        async def fake_trigger(classification, adapter, **kwargs):
             evolution_calls.append(classification)
 
         with patch.object(rh, "_trigger_soul_evolution", side_effect=fake_trigger):

@@ -487,6 +487,11 @@ def _wrap_send(adapter: Any) -> None:
                 "[humanness_hook] public-mode resolver failed; defaulting off"
             )
 
+        # DGM-H W1 dedup flag — true once patina has produced a usable
+        # rewrite this turn, so the downstream gate can skip its own
+        # redundant patina round-trip.
+        _pre_rewritten: bool = False
+
         if is_public_mode and _should_score(content):
             # Step 4 stage 3 (public path): patina --profile social rewrite.
             # Always attempts a rewrite, structural pollution or not — the
@@ -519,6 +524,7 @@ def _wrap_send(adapter: Any) -> None:
                         len(content), len(rewritten),
                     )
                     content = rewritten
+                    _pre_rewritten = True
             except Exception:
                 logger.exception(
                     "[humanness_hook] public-mode rewrite failed; using original"
@@ -544,6 +550,7 @@ def _wrap_send(adapter: Any) -> None:
                                 len(rewritten),
                             )
                             content = rewritten
+                            _pre_rewritten = True
                         else:
                             logger.info(
                                 "[humanness_hook] rewrite still polluted (%s); "
@@ -558,14 +565,21 @@ def _wrap_send(adapter: Any) -> None:
         # Pre-send length gate (skill-backed, with in-process fallback). Final
         # length enforcement after patina rewrite to honor SOUL.md 1-2 sentence
         # cap. Handles both public and 1:1 paths uniformly.
+        _gate_decision: Optional[str] = None
+        _gate_in_len: int = len(content)
+        _gate_out_len: int = len(content)
         try:
             from dgmh.hermes_integration.pre_send_gate import gate as _length_gate
             from dgmh.honcho_client import channel_kind_for as _channel_kind_for
 
             _kind = _channel_kind_for(str(chat_id))
             _decision, _new_content = _length_gate(
-                content, channel_kind=_kind
+                content,
+                channel_kind=_kind,
+                pre_rewritten=_pre_rewritten,
             )
+            _gate_decision = _decision
+            _gate_out_len = len(_new_content)
             if _decision != "send" and _new_content != content:
                 logger.info(
                     "[humanness_hook] length gate applied "
@@ -622,6 +636,31 @@ def _wrap_send(adapter: Any) -> None:
             _record_bot_send(str(chat_id))
         except Exception:
             pass
+
+        # DGM-H W3: cache the gate decision keyed by the outbound message
+        # id so reaction_hook can later refine `negative` reactions into
+        # `negative_truncated` vs `negative_content` based on whether the
+        # send was cut at the cap.
+        try:
+            if _gate_decision is not None:
+                from dgmh.hermes_integration.gate_decisions import (
+                    _ends_with_ellipsis_marker,
+                    record_decision,
+                )
+
+                _msg_id = getattr(result, "message_id", None) or (
+                    result.get("message_id") if isinstance(result, dict) else None
+                )
+                if _msg_id:
+                    record_decision(
+                        str(_msg_id),
+                        decision=_gate_decision,
+                        in_len=_gate_in_len,
+                        out_len=_gate_out_len,
+                        ends_in_ellipsis=_ends_with_ellipsis_marker(content),
+                    )
+        except Exception:
+            logger.exception("[humanness_hook] gate_decisions cache write failed")
 
         try:
             if not _should_score(content):
