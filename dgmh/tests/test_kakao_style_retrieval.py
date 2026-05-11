@@ -140,6 +140,22 @@ class TestBuildProfileBody(unittest.TestCase):
         # through to the static profile or original text.
         self.assertEqual(build_kakao_rag_profile_body([]), "")
 
+    def test_public_haeyo_mode_locks_register(self) -> None:
+        body = build_kakao_rag_profile_body(
+            ["좋아", "넹 뭐 그런거같아용"],
+            register_mode="public_haeyo",
+        )
+
+        self.assertIn("Register lock (public Discord)", body)
+        self.assertIn("해요체-casual 하나로 고정", body)
+        self.assertIn("반말 종결은 쓰지 않는다", body)
+        self.assertIn("한 답변 안에서 존댓말/반말을 섞지 않는다", body)
+
+    def test_default_profile_keeps_mirror_mode_without_public_lock(self) -> None:
+        body = build_kakao_rag_profile_body(["좋아"], register_mode="mirror")
+
+        self.assertNotIn("Register lock (public Discord)", body)
+
 
 class TestRewriteWithRagProfileCleanup(unittest.TestCase):
     def test_profile_file_removed_even_on_patina_exception(self) -> None:

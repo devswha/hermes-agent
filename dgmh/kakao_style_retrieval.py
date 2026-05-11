@@ -171,7 +171,9 @@ def retrieve_top_k(
         return []
 
 
-def build_kakao_rag_profile_body(anchors: list[str]) -> str:
+def build_kakao_rag_profile_body(
+    anchors: list[str], *, register_mode: str = "mirror"
+) -> str:
     """Render a per-call patina profile body around the retrieved anchors.
 
     Mirrors the static ``kakao-mimic.md`` layout but advertises the
@@ -222,13 +224,29 @@ def build_kakao_rag_profile_body(anchors: list[str]) -> str:
         "- hedging(같아요/보여요/~듯)은 한 응답에 한 번까지.",
         "- 의견은 1인칭으로 한쪽만: \"난 ~쪽이야\".",
         "",
-        "## Reference voice anchors (draft-specific top-K)",
-        "",
-        "다음 메시지들은 운영자의 실제 카톡 그룹 대화에서 본 draft와 가장 가까운 항목들이다.",
-        "그대로 따라하지 말고, 톤·길이·어미 패턴만 미러링한다.",
-        "",
-        "```",
     ]
+    if register_mode == "public_haeyo":
+        lines.extend(
+            [
+                "## Register lock (public Discord)",
+                "",
+                "- 이 profile은 공개 Discord 봇대화용이다. 최종문은 해요체-casual 하나로 고정한다.",
+                "- `~요`, `~죠`, `~네요`, `~네여`, `~슴다/읍니다`, `~용/여`는 허용한다.",
+                "- `~야`, `~해`, `~할게`, `~좋아`, `~맞아`, `~몰라`, `~가자` 같은 반말 종결은 쓰지 않는다.",
+                "- anchor에 반말이 있어도 어미는 해요체-casual로 변환하고, 한 답변 안에서 존댓말/반말을 섞지 않는다.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Reference voice anchors (draft-specific top-K)",
+            "",
+            "다음 메시지들은 운영자의 실제 카톡 그룹 대화에서 본 draft와 가장 가까운 항목들이다.",
+            "그대로 따라하지 말고, 톤·길이·어미 패턴만 미러링한다.",
+            "",
+            "```",
+        ]
+    )
     lines.extend(anchors)
     lines.extend(["```", ""])
     return "\n".join(lines) + "\n"
@@ -247,6 +265,7 @@ def rewrite_with_rag_profile(
     lang: str = "ko",
     timeout_s: float = 30.0,
     profiles_dir: Optional[Path] = None,
+    register_mode: str = "mirror",
 ) -> Optional[str]:
     """Run patina with a per-call profile populated by retrieved anchors.
 
@@ -280,7 +299,7 @@ def rewrite_with_rag_profile(
 
     profile_name = f"kakao-mimic-rag-{uuid.uuid4().hex[:8]}"
     profile_path = profile_dir / f"{profile_name}.md"
-    body = build_kakao_rag_profile_body(anchors)
+    body = build_kakao_rag_profile_body(anchors, register_mode=register_mode)
     try:
         profile_path.write_text(body, encoding="utf-8")
     except OSError as e:
