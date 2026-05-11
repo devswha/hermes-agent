@@ -85,6 +85,41 @@ def _clean_discord_id(entry: str) -> str:
     return entry.strip()
 
 
+def _message_contains_user_mention(content: str, user_id: str) -> bool:
+    """Return True when raw Discord text names a user mention for ``user_id``."""
+    if not content or not user_id:
+        return False
+    return f"<@{user_id}>" in content or f"<@!{user_id}>" in content
+
+
+def _promote_raw_user_mention(message: Any, user: Any) -> bool:
+    """Promote raw ``<@id>`` text into ``message.mentions`` for trusted callers.
+
+    Some friendly bots render mention syntax while suppressing Discord's
+    parsed mentions via ``allowed_mentions``. Hermes' routing checks the parsed
+    ``message.mentions`` list, so a trusted bot can appear to mention us while
+    the adapter sees no mention. This keeps the fallback explicit and scoped:
+    callers decide when a message is trusted enough to promote.
+    """
+    if user is None:
+        return False
+    mentions = getattr(message, "mentions", None)
+    if mentions is None:
+        mentions = []
+    if user in mentions:
+        return False
+    user_id = str(getattr(user, "id", "") or "")
+    content = str(getattr(message, "content", "") or "")
+    if not _message_contains_user_mention(content, user_id):
+        return False
+    try:
+        mentions.append(user)
+    except AttributeError:
+        mentions = [*mentions, user]
+    message.mentions = mentions
+    return True
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available."""
     return DISCORD_AVAILABLE
@@ -745,6 +780,12 @@ class DiscordAdapter(BasePlatformAdapter):
                         elif allow_bots == "mentions":
                             if not self._client.user or self._client.user not in message.mentions:
                                 return
+                    elif _promote_raw_user_mention(message, self._client.user):
+                        logger.info(
+                            "[%s] Promoted raw mention from allowed bot user %s",
+                            self.name,
+                            _author_id_str,
+                        )
                     # "all" or DGM-H whitelist falls through; bot is
                     # permitted — skip the human-user allowlist below
                     # (bots aren't in it).
@@ -4440,6 +4481,7 @@ class DiscordAdapter(BasePlatformAdapter):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            platform_extra=self.config.extra,
         )
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:

@@ -5,6 +5,8 @@ import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from gateway.platforms.discord import _promote_raw_user_mention
+
 
 def _make_author(*, bot: bool = False, is_self: bool = False):
     """Create a mock Discord author."""
@@ -98,10 +100,51 @@ class TestDiscordBotFilter(unittest.TestCase):
         msg = _make_message(author=bot, mentions=[our_user])
         self.assertTrue(self._run_filter(msg, "mentions", our_user))
 
+    def test_allowed_bot_raw_mention_can_be_promoted(self):
+        """Trusted bots may render <@id> while suppressing parsed mentions."""
+        our_user = _make_author(is_self=True)
+        bot = _make_author(bot=True)
+        msg = _make_message(
+            author=bot,
+            content=f"플라스크~ <@{our_user.id}> 들리니?",
+            mentions=[],
+        )
+
+        self.assertTrue(_promote_raw_user_mention(msg, our_user))
+        self.assertIn(our_user, msg.mentions)
+
+    def test_allowed_bot_raw_nick_mention_can_be_promoted(self):
+        """The Discord nickname mention form <@!id> is equivalent."""
+        our_user = _make_author(is_self=True)
+        bot = _make_author(bot=True)
+        msg = _make_message(
+            author=bot,
+            content=f"플라스크~ <@!{our_user.id}> 들리니?",
+            mentions=[],
+        )
+
+        self.assertTrue(_promote_raw_user_mention(msg, our_user))
+        self.assertIn(our_user, msg.mentions)
+
+    def test_raw_mention_promotion_requires_matching_user_id(self):
+        """Do not promote random raw mention text for another user."""
+        our_user = _make_author(is_self=True)
+        bot = _make_author(bot=True)
+        msg = _make_message(
+            author=bot,
+            content="다른 봇 <@123456> 들리니?",
+            mentions=[],
+        )
+
+        self.assertFalse(_promote_raw_user_mention(msg, our_user))
+        self.assertNotIn(our_user, msg.mentions)
+
     def test_default_is_none(self):
         """Default behavior (no env var) should be 'none'."""
-        default = os.getenv("DISCORD_ALLOW_BOTS", "none")
-        self.assertEqual(default, "none")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DISCORD_ALLOW_BOTS", None)
+            default = os.getenv("DISCORD_ALLOW_BOTS", "none")
+            self.assertEqual(default, "none")
 
     def test_case_insensitive(self):
         """Allow_bots value should be case-insensitive."""
