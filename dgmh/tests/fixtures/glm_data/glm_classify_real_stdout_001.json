@@ -1,0 +1,26 @@
+{
+  "request": {
+    "model": "glm-4.5",
+    "messages": [
+      {"role": "system", "content": "Classify the message into one ko-* category."},
+      {"role": "user", "content": "ㅋㅋㅋ 이거 진짜 웃기다"}
+    ]
+  },
+  "response": {
+    "id": "chatcmpl-test-001",
+    "object": "chat.completion",
+    "created": 1715472000,
+    "model": "glm-4.5",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"msg_id\": \"m001\", \"categories\": [\"ko-communication\"], \"_new_proposals\": []}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 42, "completion_tokens": 18, "total_tokens": 60}
+  }
+}

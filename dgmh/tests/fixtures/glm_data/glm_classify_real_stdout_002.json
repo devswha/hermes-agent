@@ -1,0 +1,26 @@
+{
+  "request": {
+    "model": "glm-4.5",
+    "messages": [
+      {"role": "system", "content": "Classify the message into one ko-* category."},
+      {"role": "user", "content": "내일 오전에 시간 괜찮으신가요?"}
+    ]
+  },
+  "response": {
+    "id": "chatcmpl-test-002",
+    "object": "chat.completion",
+    "created": 1715472100,
+    "model": "glm-4.5",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"msg_id\": \"m002\", \"categories\": [\"ko-structure\", \"ko-language\"], \"_new_proposals\": []}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 47, "completion_tokens": 22, "total_tokens": 69}
+  }
+}

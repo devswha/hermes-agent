@@ -1,0 +1,26 @@
+{
+  "request": {
+    "model": "glm-4.5",
+    "messages": [
+      {"role": "system", "content": "Aggregate per-category counts from the messages."},
+      {"role": "user", "content": "[{\"msg_id\":\"m001\",\"categories\":[\"ko-communication\"]},{\"msg_id\":\"m002\",\"categories\":[\"ko-structure\"]}]"}
+    ]
+  },
+  "response": {
+    "id": "chatcmpl-test-003",
+    "object": "chat.completion",
+    "created": 1715472200,
+    "model": "glm-4.5",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"counts\": {\"ko-communication\": 1, \"ko-structure\": 1}, \"_new_proposals\": []}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 71, "completion_tokens": 26, "total_tokens": 97}
+  }
+}
