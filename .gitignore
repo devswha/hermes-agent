@@ -70,3 +70,11 @@ mini-swe-agent/
 result
 website/static/api/skills-index.json
 models-dev-upstream/
+
+# DGM-H GLM data v1 staging (secondary defense — staging actually lives at
+# ~/.hermes/dgmh/glm_data_v1/staging/, outside this worktree; these entries
+# only guard against an operator accidentally symlinking or copying staging
+# into the repo. Primary defense is the StagingWriter path-guard in
+# dgmh/glm_data/staging_writer.py.)
+dgmh/glm_data_v1/
+glm_data_v1/staging/
