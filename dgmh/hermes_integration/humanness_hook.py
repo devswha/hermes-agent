@@ -242,6 +242,58 @@ def _normalize_public_haeyo_register(content: str) -> str:
     return text
 
 
+# operator patch: 해요체 → 반말 mechanical converter (always force 반말)
+_FORCE_BANMAL_FIXES = (
+    # Longer patterns first to avoid sub-string clash
+    (re.compile(r"드릴까요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"드릴까\g<s>"),
+    (re.compile(r"드릴게요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"드릴게\g<s>"),
+    (re.compile(r"드려요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"드려\g<s>"),
+    (re.compile(r"해주세요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"해줘\g<s>"),
+    (re.compile(r"잖아요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"잖아\g<s>"),
+    (re.compile(r"거든요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"거든\g<s>"),
+    (re.compile(r"네요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"네\g<s>"),
+    (re.compile(r"습니다(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"어\g<s>"),
+    (re.compile(r"ㅂ니다(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"어\g<s>"),
+    (re.compile(r"아니에요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"아냐\g<s>"),
+    (re.compile(r"예요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"야\g<s>"),
+    (re.compile(r"에요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"야\g<s>"),
+    (re.compile(r"세요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"어\g<s>"),
+    (re.compile(r"어요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"어\g<s>"),
+    (re.compile(r"아요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"아\g<s>"),
+    (re.compile(r"줘요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"줘\g<s>"),
+    (re.compile(r"돼요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"돼\g<s>"),
+    (re.compile(r"해요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"해\g<s>"),
+    (re.compile(r"가요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"가\g<s>"),
+    (re.compile(r"와요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"와\g<s>"),
+    (re.compile(r"까요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"까\g<s>"),
+    (re.compile(r"죠(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"지\g<s>"),
+    # Korean verb conjugation variants
+    (re.compile(r"워요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"워\g<s>"),  # 더워요, 추워요
+    (re.compile(r"펴요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"펴\g<s>"),
+    (re.compile(r"켜요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"켜\g<s>"),
+    (re.compile(r"려요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"려\g<s>"),
+    (re.compile(r"여요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"여\g<s>"),
+    (re.compile(r"게요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"게\g<s>"),  # 할게요, 갈게요, 볼게요
+    (re.compile(r"봐요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"봐\g<s>"),
+    (re.compile(r"봬요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"봬\g<s>"),
+    (re.compile(r"줄게요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"줄게\g<s>"),
+    (re.compile(r"줘요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"줘\g<s>"),  # already had but reinforce
+    (re.compile(r"지요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"지\g<s>"),
+    (re.compile(r"쥐요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"쥐\g<s>"),
+    (re.compile(r"라요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"라\g<s>"),  # 골라요 → 골라
+    (re.compile(r"러요(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"러\g<s>"),
+    (re.compile(r"러죠(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), r"러지\g<s>"),
+)
+
+
+def _force_banmal_register(content: str) -> str:
+    """Mechanical 해요체 → 반말 어미 변환 (operator patch, always-on)."""
+    text = str(content or "")
+    for pattern, replacement in _FORCE_BANMAL_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _structural_pollution_check(content: str) -> tuple[bool, list[str]]:
     """Return (should_prune, list_of_matched_pattern_names).
 
@@ -754,7 +806,7 @@ def _wrap_send(adapter: Any) -> None:
                 rewritten = await _patina_rewrite_dispatch(
                     content,
                     timeout_s=30.0,
-                    register_mode="public_haeyo",
+                    register_mode="mirror",  # operator patch: stop forcing 해요체
                 )
                 if rewritten is None:
                     # D8 fallback: Codex-direct prompt as a safety net.
@@ -847,7 +899,17 @@ def _wrap_send(adapter: Any) -> None:
                 )
                 content = scrubbed
 
-        if is_public_channel_send:
+        # operator patch: force 반말 on every send (1:1 + public), replaces the
+        # old public-only haeyo normalizer which forced 해요체.
+        normalized = _force_banmal_register(content)
+        if normalized != content:
+            logger.info(
+                "[humanness_hook] force_banmal applied (len=%d→%d)",
+                len(content),
+                len(normalized),
+            )
+            content = normalized
+        if False and is_public_channel_send:
             normalized = _normalize_public_haeyo_register(content)
             if normalized != content:
                 logger.info(
