@@ -248,7 +248,12 @@ def _parse_content(content: str) -> dict:
         ) from exc
     if isinstance(parsed, dict) and isinstance(parsed.get("_new_proposals"), list):
         parsed["_new_proposals"] = [
-            p for p in parsed["_new_proposals"] if isinstance(p, dict) and p
+            p for p in parsed["_new_proposals"]
+            if isinstance(p, dict)
+            and p
+            and p.get("name")
+            and p.get("exemplar_msg_ids")
+            and p.get("candidate_target_file")
         ]
     try:
         jsonschema.validate(parsed, CLASSIFY_RESPONSE_SCHEMA)
