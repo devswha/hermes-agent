@@ -204,9 +204,33 @@ def _is_public_runtime_noise(content: str) -> bool:
     return any(first_line.startswith(prefix) for prefix in _PUBLIC_TOOL_PROGRESS_PREFIXES) and ":" in first_line
 
 
+_USER_QUOTE_PREFIX_RE = re.compile(
+    r"^\[[^\]\n]{1,40}\][^\n]{0,200}\n+",
+)
+
+
+def _strip_leaked_user_quote(content: str) -> str:
+    """Drop a leaked `[username] <echoed user message>\\n` first line.
+
+    gateway/run.py prepends `[user_name]` to inbound text in shared multi-user
+    sessions so the model can tell speakers apart. Kimi often echoes that
+    prefix back into the reply, surfacing as `[하코] 야\\n\\n뭐야 하코, ...`
+    in Discord. Strip the leading quote line only when there's body text
+    after it (so legitimate `[...]` openings are preserved).
+    """
+    m = _USER_QUOTE_PREFIX_RE.match(content)
+    if not m:
+        return content
+    remainder = content[m.end():]
+    if not remainder.strip():
+        return content
+    return remainder
+
+
 def _sanitize_public_outbound(content: str) -> str:
     """Apply deterministic public-room safety cleanup before Discord send."""
     text = _strip_internal_metadata_blocks(content)
+    text = _strip_leaked_user_quote(text)
     if _is_public_runtime_noise(text):
         return ""
     return text.strip()
