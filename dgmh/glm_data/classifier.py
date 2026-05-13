@@ -246,6 +246,10 @@ def _parse_content(content: str) -> dict:
         raise GLMResponseSchemaError(
             f"GLM returned non-JSON content for classifier: {exc}"
         ) from exc
+    if isinstance(parsed, dict) and isinstance(parsed.get("_new_proposals"), list):
+        parsed["_new_proposals"] = [
+            p for p in parsed["_new_proposals"] if isinstance(p, dict) and p
+        ]
     try:
         jsonschema.validate(parsed, CLASSIFY_RESPONSE_SCHEMA)
     except jsonschema.ValidationError as exc:
