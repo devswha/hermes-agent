@@ -22,6 +22,7 @@ import random
 import re
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 
@@ -327,11 +328,32 @@ _FORCE_BANMAL_FIXES = (
 )
 
 
+# NFD-decomposed patterns: catch Hangul precomposed forms where a morpheme
+# boundary is hidden inside a single syllable (e.g. 예쁜데요, where ㄴ batchim
+# fuses into 쁜). Precomposed regex above can't see into syllable codepoints.
+# NFD decomposes a syllable into Lead+Vowel+(Final) jamo runs, then the jamo
+# pattern matches across them. After substitution we re-compose with NFC.
+def _nfd(s: str) -> str:
+    return unicodedata.normalize("NFD", s)
+
+
+_NFD_FORCE_BANMAL_FIXES = (
+    # -ㄴ데요 (batchim ㄴ + 데요) → -ㄴ데  e.g. 예쁜데요 → 예쁜데, 큰데요 → 큰데
+    # Pattern is NFD-normalized so 데요 also decomposes to match NFD'd input.
+    (re.compile(_nfd("ᆫ데요") + r"(?P<s>[.!?…~ㅋㅎㅠㅜ]*)(?=$|\s)"), _nfd("ᆫ데") + r"\g<s>"),
+)
+
+
 def _force_banmal_register(content: str) -> str:
     """Mechanical 해요체 → 반말 어미 변환 (operator patch, always-on)."""
     text = str(content or "")
     for pattern, replacement in _FORCE_BANMAL_FIXES:
         text = pattern.sub(replacement, text)
+    if _NFD_FORCE_BANMAL_FIXES:
+        nfd = unicodedata.normalize("NFD", text)
+        for pattern, replacement in _NFD_FORCE_BANMAL_FIXES:
+            nfd = pattern.sub(replacement, nfd)
+        text = unicodedata.normalize("NFC", nfd)
     return text
 
 
