@@ -10,6 +10,7 @@ from dgmh.hermes_integration.humanness_hook import (
     _INLINE_BACKTICK_RE,
     _INLINE_BOLD_RE,
     _apply_self_evolution_notice,
+    _force_banmal_register,
     _normalize_public_haeyo_register,
     _sanitize_public_outbound,
     _strip_internal_metadata_blocks,
@@ -177,6 +178,23 @@ class TestPublicRegisterNormalizer(unittest.TestCase):
         got = _normalize_public_haeyo_register("오 좋아요 ㅋㅋ 그건 맞네요.")
 
         self.assertEqual(got, "오 좋아요 ㅋㅋ 그건 맞네요.")
+
+
+class TestForceBanmalRegister(unittest.TestCase):
+    def test_converts_common_formal_first_person_and_endings(self) -> None:
+        got = _force_banmal_register("저는 아니요. 제가 갈래요.")
+
+        self.assertEqual(got, "난 아니. 내가 갈래.")
+
+    def test_converts_first_person_particles(self) -> None:
+        got = _force_banmal_register("저한테 주세요. 저도 저를 믿어요. 저희가 해요.")
+
+        self.assertEqual(got, "나한테 줘. 나도 날 믿어. 우리가 해.")
+
+    def test_does_not_rewrite_first_person_inside_other_words(self) -> None:
+        got = _force_banmal_register("저녁엔 저것 말고 제목만 봐요.")
+
+        self.assertEqual(got, "저녁엔 저것 말고 제목만 봐.")
 
 
 class TestInlineBacktickStrip(unittest.TestCase):

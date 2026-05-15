@@ -28,12 +28,77 @@ from __future__ import annotations
 import logging
 import re
 import inspect
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Memory query router
+# ---------------------------------------------------------------------------
+
+_MEMORY_RECALL_RE = re.compile(
+    r"(기억|기억나|전에|예전에|지난번|저번|말했|얘기했|언급했|remember|recall|last time|previously)",
+    re.IGNORECASE,
+)
+_PREFERENCE_RE = re.compile(
+    r"(선호|취향|싫어|좋아|원해|스타일|말투|호칭|timezone|profile|preference)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_RE = re.compile(
+    r"(프로젝트|저장소|repo|repository|작업 방식|컨벤션|convention|우리 .*작업|내가 .*작업)",
+    re.IGNORECASE,
+)
+_CURRENT_FACT_RE = re.compile(
+    r"(지금|오늘|현재|최신|날씨|뉴스|몇 ?시|몇 ?일|버전|가격|주가|\b(?:current|latest|weather|news|time|date)\b)",
+    re.IGNORECASE,
+)
+_LOW_CONTEXT_RE = re.compile(
+    r"^(ㅋ+|ㅎ+|ㅇㅋ|ㅇㅇ|ㄱㄱ|ㄴㄴ|야|왜|응|어|네|ok|okay|lol|lmao|thanks|thx)[\s.!?~]*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class MemoryRoute:
+    """Decision for whether a user message should trigger memory prefetch."""
+
+    should_prefetch: bool
+    intent: str
+    reason: str
+
+
+def route_memory_query(query: str) -> MemoryRoute:
+    """Classify a user query before hitting external memory providers.
+
+    This is intentionally small and conservative. It only skips obvious cases
+    where recalled memory is more likely to add stale noise than useful context;
+    ambiguous queries still prefetch to preserve existing behavior.
+    """
+    text = (query or "").strip()
+    if not text:
+        return MemoryRoute(False, "empty", "empty query")
+
+    if _LOW_CONTEXT_RE.match(text) or (len(text) <= 2 and not _MEMORY_RECALL_RE.search(text)):
+        return MemoryRoute(False, "low_context_chatter", "too little semantic content")
+
+    if _MEMORY_RECALL_RE.search(text):
+        return MemoryRoute(True, "memory_recall", "explicit recall cue")
+
+    if _PREFERENCE_RE.search(text):
+        return MemoryRoute(True, "personal_preference", "preference/profile cue")
+
+    if _PROJECT_CONTEXT_RE.search(text):
+        return MemoryRoute(True, "project_context", "project continuity cue")
+
+    if _CURRENT_FACT_RE.search(text):
+        return MemoryRoute(False, "current_fact", "current facts should use live tools")
+
+    return MemoryRoute(True, "general_context", "ambiguous query; preserve recall")
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +353,15 @@ class MemoryManager:
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
         """
+        route = route_memory_query(query)
+        if not route.should_prefetch:
+            logger.debug(
+                "memory router skipped prefetch: intent=%s reason=%s",
+                route.intent,
+                route.reason,
+            )
+            return ""
+
         parts = []
         for provider in self._providers:
             try:
@@ -303,6 +377,15 @@ class MemoryManager:
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
+        route = route_memory_query(query)
+        if not route.should_prefetch:
+            logger.debug(
+                "memory router skipped queued prefetch: intent=%s reason=%s",
+                route.intent,
+                route.reason,
+            )
+            return
+
         for provider in self._providers:
             try:
                 provider.queue_prefetch(query, session_id=session_id)

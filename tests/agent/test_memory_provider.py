@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from agent.memory_provider import MemoryProvider
-from agent.memory_manager import MemoryManager
+from agent.memory_manager import MemoryManager, route_memory_query
 
 # ---------------------------------------------------------------------------
 # Concrete test provider
@@ -213,6 +213,57 @@ class TestMemoryManager:
 
         result = mgr.prefetch_all("query")
         assert result == "Has memories"
+
+    def test_memory_router_prefetches_recall_queries(self):
+        route = route_memory_query("전에 내가 말한 말투 취향 기억나?")
+
+        assert route.should_prefetch is True
+        assert route.intent == "memory_recall"
+
+    def test_memory_router_skips_low_context_chatter(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "stale context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("ㅋㅋ")
+
+        assert result == ""
+        assert p.prefetch_queries == []
+
+    def test_memory_router_skips_current_fact_queries(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "old context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("지금 몇 시야?")
+
+        assert result == ""
+        assert p.prefetch_queries == []
+
+    def test_memory_router_current_fact_english_terms_are_word_bounded(self):
+        assert route_memory_query("runtime error from provider").should_prefetch is True
+        assert route_memory_query("validate this memory patch").should_prefetch is True
+        assert route_memory_query("candidate project context").should_prefetch is True
+        assert route_memory_query("what time is it?").should_prefetch is False
+
+    def test_memory_router_recall_cues_win_over_current_fact_cues(self):
+        route = route_memory_query("지금 전에 말한 프로젝트 기억나?")
+
+        assert route.should_prefetch is True
+        assert route.intent == "memory_recall"
+
+    def test_memory_router_allows_project_and_preference_queries(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "remembered project context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("내가 선호하는 프로젝트 작업 방식 뭐였지?")
+
+        assert result == "remembered project context"
+        assert p.prefetch_queries == ["내가 선호하는 프로젝트 작업 방식 뭐였지?"]
 
     def test_queue_prefetch_all(self):
         mgr = MemoryManager()
