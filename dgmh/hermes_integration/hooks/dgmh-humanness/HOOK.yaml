@@ -1,8 +1,0 @@
-name: dgmh-humanness
-description: "DGM-H C2 — score Discord assistant outputs with patina, log to humanness_log.jsonl"
-events:
-  - gateway:startup
-# Step 0 (v3) — wrap-order documentation. Higher priority runs FIRST →
-# wraps INNERMOST around adapter.send. humanness must see the actual
-# outbound text before honcho mirrors it.
-priority: 100
