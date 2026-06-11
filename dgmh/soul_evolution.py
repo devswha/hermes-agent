@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -225,6 +226,79 @@ def _atomic_write_text(path: Path, content: str) -> None:
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Runtime-home git history (optional, best-effort)
+# ---------------------------------------------------------------------------
+
+# The operator may keep a git repo in the runtime home (where SOUL.md lives)
+# with an allowlist .gitignore so manual + evolved SOUL.md changes show up as
+# reviewable `git log -p` history. The auto-commit refuses to run unless the
+# repo is default-deny: every sentinel below must be gitignored, including
+# the nonexistent probe name — if an unknown filename is NOT ignored, the
+# repo lacks the `*` allowlist rule and `git add -A` could stage secrets.
+_GIT_AUTOCOMMIT_SENTINELS = (
+    "auth.json",
+    ".env",
+    "config.yaml",
+    "__dgmh_default_deny_probe__",
+)
+
+_GIT_TIMEOUT_S = 10.0
+
+
+def _git(home: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(home),
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT_S,
+    )
+
+
+def _git_autocommit_soul_history(home: Path, summary: str) -> bool:
+    """Best-effort commit of SOUL.md + evolution history into a git repo at
+    ``home`` (the runtime home), if the operator has set one up.
+
+    Never raises — history capture must not block or fail an evolution run.
+    Returns True only when a new commit was created.
+    """
+    try:
+        if not (home / ".git").is_dir():
+            return False
+        for sentinel in _GIT_AUTOCOMMIT_SENTINELS:
+            if _git(home, "check-ignore", "-q", "--", sentinel).returncode != 0:
+                logger.warning(
+                    "soul_evolution: runtime-home git repo does not ignore "
+                    "%r — refusing to auto-commit (allowlist .gitignore "
+                    "missing?)",
+                    sentinel,
+                )
+                return False
+        if _git(home, "add", "-A").returncode != 0:
+            return False
+        status = _git(home, "status", "--porcelain")
+        if status.returncode != 0 or not status.stdout.strip():
+            return False
+        commit = _git(
+            home,
+            "-c", "user.name=dgmh-runtime",
+            "-c", "user.email=dgmh-runtime@localhost",
+            "commit", "-q", "-m", f"chore(soul): {summary}",
+        )
+        if commit.returncode != 0:
+            logger.warning(
+                "soul_evolution: git auto-commit failed: %s",
+                (commit.stderr or commit.stdout).strip(),
+            )
+            return False
+        logger.info("soul_evolution: committed soul history (%s)", summary)
+        return True
+    except Exception as exc:
+        logger.warning("soul_evolution: git auto-commit skipped: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +804,14 @@ def _run_soul_evolution_impl(opts: SoulEvolutionOpts) -> bool:
             rejection_reason = f"write-error: {exc}"
             logger.error("soul_evolution: failed to write SOUL.md: %s", exc)
             accepted = False
+
+    if accepted:
+        # Best-effort: snapshot the accepted soul into the runtime-home git
+        # history repo, when the operator maintains one (allowlist .gitignore).
+        _git_autocommit_soul_history(
+            soul_path.parent,
+            f"gen {next_gen_index} accepted (hash {child_hash[:12]})",
+        )
 
     # Step 5b / always: Write run record
     record = SoulRunRecord(
