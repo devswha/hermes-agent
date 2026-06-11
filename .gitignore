@@ -78,3 +78,6 @@ models-dev-upstream/
 # dgmh/glm_data/staging_writer.py.)
 dgmh/glm_data_v1/
 glm_data_v1/staging/
+
+# Local scratch (ad-hoc test scripts, never committed)
+.hermes-tmp/
