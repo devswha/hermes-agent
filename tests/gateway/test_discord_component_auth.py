@@ -228,3 +228,38 @@ def test_model_picker_view_empty_allowlists_allow_everyone():
     )
     assert view.allowed_role_ids == set()
     assert view._check_auth(_interaction(99999)) is True
+
+
+# ── DISCORD_APPROVAL_USERS: dedicated approver allowlist ────────────────────
+#
+# Public-persona deployments leave the conversation allowlists empty so
+# anyone can talk to the bot; the legacy empty->allow branch then let any
+# guild member click exec-approval buttons. DISCORD_APPROVAL_USERS narrows
+# component clicks to the listed users without touching conversation gates.
+
+
+def test_approval_users_env_restricts_clicks_to_listed_users(monkeypatch):
+    monkeypatch.setenv("DISCORD_APPROVAL_USERS", "266436073557590016")
+    operator = _interaction(266436073557590016)
+    stranger = _interaction(11111)
+    assert _component_check_auth(operator, set(), set()) is True
+    assert _component_check_auth(stranger, set(), set()) is False
+
+
+def test_approval_users_env_overrides_conversation_allowlists(monkeypatch):
+    monkeypatch.setenv("DISCORD_APPROVAL_USERS", "1")
+    in_conversation_allowlist = _interaction(22222)
+    assert (
+        _component_check_auth(in_conversation_allowlist, {"22222"}, set())
+        is False
+    )
+
+
+def test_approval_users_env_rejects_missing_user(monkeypatch):
+    monkeypatch.setenv("DISCORD_APPROVAL_USERS", "1")
+    assert _component_check_auth(_interaction(0, drop_user=True), set(), set()) is False
+
+
+def test_approval_users_env_unset_keeps_legacy_open_behavior(monkeypatch):
+    monkeypatch.delenv("DISCORD_APPROVAL_USERS", raising=False)
+    assert _component_check_auth(_interaction(11111), set(), set()) is True

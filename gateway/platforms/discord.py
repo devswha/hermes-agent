@@ -4577,6 +4577,12 @@ def _component_check_auth(
 
     Behavior:
 
+      - DISCORD_APPROVAL_USERS set -> ONLY those user IDs may click,
+        regardless of the conversation allowlists. This decouples
+        execution/control authority from conversation permission for
+        public-persona deployments where anyone may talk to the bot
+        (empty conversation allowlists) but only the operator may
+        approve exec commands or press control buttons.
       - both allowlists empty -> allow (preserves existing no-allowlist
         deployments, no regression)
       - user is in user allowlist -> allow
@@ -4586,6 +4592,16 @@ def _component_check_auth(
         -> reject (fail closed)
       - otherwise -> reject
     """
+    approver_raw = os.getenv("DISCORD_APPROVAL_USERS", "").strip()
+    if approver_raw:
+        approvers = {x.strip() for x in approver_raw.split(",") if x.strip()}
+        user = getattr(interaction, "user", None)
+        try:
+            uid = str(user.id) if user is not None else ""
+        except AttributeError:
+            uid = ""
+        return bool(uid and uid in approvers)
+
     user_set = allowed_user_ids or set()
     role_set = allowed_role_ids or set()
     has_users = bool(user_set)
