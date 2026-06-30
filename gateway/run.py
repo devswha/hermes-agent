@@ -1707,10 +1707,26 @@ class GatewayRunner:
         if getattr(source, "platform", None) != Platform.DISCORD:
             return False
         try:
-            return is_configured_shared_group_channel(
+            if is_configured_shared_group_channel(
                 source,
                 config=getattr(self, "config", None),
-            )
+            ):
+                return True
+            # DGM-H: also suppress transient lifecycle status (retry / empty-
+            # response / fallback bubbles) in the operator's own home channels,
+            # where the operator does not want them surfacing as if they were
+            # errors. Tool progress is already off for Discord, so this only
+            # hides the noisy lifecycle notices, not real responses.
+            op_raw = os.getenv("DGMH_HOME_OPERATOR_CHANNELS", "")
+            op_channels = {c.strip() for c in op_raw.split(",") if c.strip()}
+            if op_channels:
+                ids = {str(getattr(source, "chat_id", "") or "")}
+                parent = str(getattr(source, "parent_chat_id", "") or "")
+                if parent:
+                    ids.add(parent)
+                if ids & op_channels:
+                    return True
+            return False
         except Exception:
             return False
 

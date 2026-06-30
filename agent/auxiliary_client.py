@@ -1265,6 +1265,18 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
+def _aux_excluded_providers() -> set:
+    """Providers excluded from the auxiliary fallback chain (operator decision).
+
+    Defaults to excluding ``gemini``: its GOOGLE_API_KEY is invalid here and a
+    doomed Gemini round-trip only adds noise to every aux fallback. Override via
+    ``DGMH_AUX_EXCLUDE_PROVIDERS`` (comma-separated; empty string re-enables all).
+    """
+
+    raw = os.getenv("DGMH_AUX_EXCLUDE_PROVIDERS", "gemini")
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
 def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
     """Try each API-key provider in PROVIDER_REGISTRY order.
 
@@ -1279,6 +1291,8 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 
     for provider_id, pconfig in PROVIDER_REGISTRY.items():
         if pconfig.auth_type != "api_key":
+            continue
+        if provider_id.lower() in _aux_excluded_providers():
             continue
         if provider_id == "anthropic":
             # Only try anthropic when the user has explicitly configured it.
@@ -4345,6 +4359,14 @@ def call_llm(
         # configure this task's provider.  Explicit provider = hard constraint;
         # auto (the default) = best-effort fallback chain.  (#7559)
         is_auto = resolved_provider in ("auto", "", None)
+        # Evict a poisoned (closed / dead-loop) primary client BEFORE the
+        # fallback. A failing fallback (e.g. invalid Gemini key) otherwise skips
+        # the eviction below, leaving the dead client cached for every later call.
+        if _is_connection_error(first_err):
+            try:
+                _evict_cached_client_instance(client)
+            except Exception:
+                logger.debug("Auxiliary: pre-fallback cache eviction failed", exc_info=True)
         if should_fallback and is_auto:
             if _is_payment_error(first_err):
                 reason = "payment error"
@@ -4372,17 +4394,6 @@ def call_llm(
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
                 return _validate_llm_response(
                     fb_client.chat.completions.create(**fb_kwargs), task)
-        # Connection/timeout errors leave the cached client poisoned (closed
-        # httpx transport, half-read stream, dead async loop).  Drop it from
-        # the cache regardless of whether we found a fallback above so the
-        # next auxiliary call rebuilds a fresh client instead of reusing the
-        # dead one.  See issue #23432.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary: cache eviction after connection error failed",
-                             exc_info=True)
         raise
 
 
@@ -4667,6 +4678,17 @@ async def async_call_llm(
                     effective_extra_body=effective_extra_body,
                 )
 
+        # Evict a poisoned (closed / loop-bound) primary client BEFORE the
+        # cross-provider fallback. Otherwise, when the fallback ALSO fails
+        # (e.g. an invalid Gemini key), the eviction below is never reached and
+        # the closed client stays cached forever — every later aux call reuses
+        # it and fails identically (session_search infinite-failure loop).
+        if _is_connection_error(first_err):
+            try:
+                _evict_cached_client_instance(client)
+            except Exception:
+                logger.debug("Auxiliary (async): pre-fallback cache eviction failed",
+                             exc_info=True)
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
         should_fallback = (
             _is_payment_error(first_err)
@@ -4703,12 +4725,4 @@ async def async_call_llm(
                     fb_kwargs["model"] = async_fb_model
                 return _validate_llm_response(
                     await async_fb.chat.completions.create(**fb_kwargs), task)
-        # Mirror the sync path: drop poisoned clients on connection/timeout
-        # so the next aux call rebuilds.  See issue #23432.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary (async): cache eviction after connection error failed",
-                             exc_info=True)
         raise

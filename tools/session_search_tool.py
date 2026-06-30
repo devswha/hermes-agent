@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 import re
 from typing import Dict, Any, List, Optional, Union
 
@@ -540,6 +541,10 @@ def session_search(
 
 def check_session_search_requirements() -> bool:
     """Requires SQLite state database and an auxiliary text model."""
+    if os.getenv("HERMES_SESSION_SEARCH_DISABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return False
     try:
         from hermes_state import DEFAULT_DB_PATH
         return DEFAULT_DB_PATH.parent.exists()
