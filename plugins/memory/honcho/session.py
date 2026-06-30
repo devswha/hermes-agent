@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
 import logging
@@ -19,6 +20,30 @@ logger = logging.getLogger(__name__)
 
 # Sentinel to signal the async writer thread to shut down
 _ASYNC_SHUTDOWN = object()
+
+
+def _resolve_public_mirror_channel(session_key: str) -> str | None:
+    """Return the public Discord channel_id encoded in ``session_key`` if any.
+
+    The DGM-H Discord mirror writes channel-wide history into the
+    ``discord-public-{channel_id}`` Honcho session, but the agent's
+    per-turn session_key has the form
+    ``agent-main-discord-group-{channel_id}-{user_id}`` (after gateway
+    sanitization). To pull mirror context into the agent's recent_messages,
+    we need to recognize that the current session belongs to one of the
+    configured public channels and extract its id.
+
+    Returns the channel_id string when the session_key contains a channel
+    listed in ``DGMH_PUBLIC_CHANNELS``; otherwise None (private 1:1 or
+    non-public channels keep the per-user context untouched).
+    """
+    raw = os.environ.get("DGMH_PUBLIC_CHANNELS", "")
+    if not raw or not session_key:
+        return None
+    for ch in (c.strip() for c in raw.split(",")):
+        if ch and ch in session_key:
+            return ch
+    return None
 
 
 @dataclass
@@ -95,6 +120,7 @@ class HonchoSessionManager:
         self._config = config
         self._runtime_user_peer_name = runtime_user_peer_name
         self._cache: dict[str, HonchoSession] = {}
+        self._cache_lock = threading.RLock()
         self._peers_cache: dict[str, Any] = {}
         self._sessions_cache: dict[str, Any] = {}
 
@@ -159,11 +185,13 @@ class HonchoSessionManager:
         Peers are lazy -- no API call until first use.
         Observation settings are controlled per-session via SessionPeerConfig.
         """
-        if peer_id in self._peers_cache:
-            return self._peers_cache[peer_id]
+        with self._cache_lock:
+            if peer_id in self._peers_cache:
+                return self._peers_cache[peer_id]
 
         peer = self.honcho.peer(peer_id)
-        self._peers_cache[peer_id] = peer
+        with self._cache_lock:
+            self._peers_cache[peer_id] = peer
         return peer
 
     def _get_or_create_honcho_session(
@@ -175,9 +203,10 @@ class HonchoSessionManager:
         Returns:
             Tuple of (honcho_session, existing_messages).
         """
-        if session_id in self._sessions_cache:
-            logger.debug("Honcho session '%s' retrieved from cache", session_id)
-            return self._sessions_cache[session_id], []
+        with self._cache_lock:
+            if session_id in self._sessions_cache:
+                logger.debug("Honcho session '%s' retrieved from cache", session_id)
+                return self._sessions_cache[session_id], []
 
         session = self.honcho.session(session_id)
 
@@ -273,17 +302,35 @@ class HonchoSessionManager:
         Returns:
             The session.
         """
-        if key in self._cache:
-            logger.debug("Local session cache hit: %s", key)
-            return self._cache[key]
+        with self._cache_lock:
+            if key in self._cache:
+                logger.debug("Local session cache hit: %s", key)
+                return self._cache[key]
 
-        # Gateway sessions should use the runtime user identity when available.
-        if self._runtime_user_peer_name:
+        # Determine peer IDs — no lock needed (read-only, no shared state mutation).
+        # Gateway sessions normally use the runtime user identity (the
+        # platform-native ID: Telegram UID, Discord snowflake, Slack user,
+        # etc.) so multi-user bots scope memory per user.  For a single-user
+        # deployment the config-supplied ``peer_name`` is an unambiguous
+        # identity and we should keep it unified across platforms — see
+        # #14984.  Opt into that with ``hosts.<host>.pinPeerName: true`` in
+        # ``honcho.json`` (or root-level ``pinPeerName: true``).
+        # `is True` (not `bool(...)`) is deliberate: several multi-user tests
+        # pass a ``MagicMock`` for ``config`` where ``mock.pin_peer_name``
+        # silently returns another MagicMock — truthy by default.  Requiring
+        # strict ``True`` keeps pinning as opt-in even for callers that
+        # haven't updated their mocks yet; real configs built via
+        # ``from_global_config`` always produce a proper boolean.
+        pin_peer_name = (
+            self._config is not None
+            and bool(getattr(self._config, "peer_name", None))
+            and getattr(self._config, "pin_peer_name", False) is True
+        )
+        if self._runtime_user_peer_name and not pin_peer_name:
             user_peer_id = self._sanitize_id(self._runtime_user_peer_name)
         elif self._config and self._config.peer_name:
             user_peer_id = self._sanitize_id(self._config.peer_name)
         else:
-            # Fallback: derive from session key
             parts = key.split(":", 1)
             channel = parts[0] if len(parts) > 1 else "default"
             chat_id = parts[1] if len(parts) > 1 else key
@@ -293,19 +340,14 @@ class HonchoSessionManager:
             self._config.ai_peer if self._config else "hermes-assistant"
         )
 
-        # Sanitize session ID for Honcho
+        # All expensive I/O outside the lock — Honcho's persistence is source of truth
         honcho_session_id = self._sanitize_id(key)
-
-        # Get or create peers
         user_peer = self._get_or_create_peer(user_peer_id)
         assistant_peer = self._get_or_create_peer(assistant_peer_id)
-
-        # Get or create Honcho session
         honcho_session, existing_messages = self._get_or_create_honcho_session(
             honcho_session_id, user_peer, assistant_peer
         )
 
-        # Convert Honcho messages to local format
         local_messages = []
         for msg in existing_messages:
             role = "assistant" if msg.peer_id == assistant_peer_id else "user"
@@ -313,10 +355,9 @@ class HonchoSessionManager:
                 "role": role,
                 "content": msg.content,
                 "timestamp": msg.created_at.isoformat() if msg.created_at else "",
-                "_synced": True,  # Already in Honcho
+                "_synced": True,
             })
 
-        # Create local session wrapper with existing messages
         session = HonchoSession(
             key=key,
             user_peer_id=user_peer_id,
@@ -325,7 +366,9 @@ class HonchoSessionManager:
             messages=local_messages,
         )
 
-        self._cache[key] = session
+        # Write to cache under lock — only one writer wins
+        with self._cache_lock:
+            self._cache[key] = session
         return session
 
     def _flush_session(self, session: HonchoSession) -> bool:
@@ -356,13 +399,15 @@ class HonchoSessionManager:
             for msg in new_messages:
                 msg["_synced"] = True
             logger.debug("Synced %d messages to Honcho for %s", len(honcho_messages), session.key)
-            self._cache[session.key] = session
+            with self._cache_lock:
+                self._cache[session.key] = session
             return True
         except Exception as e:
             for msg in new_messages:
                 msg["_synced"] = False
             logger.error("Failed to sync messages to Honcho: %s", e)
-            self._cache[session.key] = session
+            with self._cache_lock:
+                self._cache[session.key] = session
             return False
 
     def _async_writer_loop(self) -> None:
@@ -434,7 +479,9 @@ class HonchoSessionManager:
         Called at session end for "session" write_frequency, or to force
         a sync before process exit regardless of mode.
         """
-        for session in list(self._cache.values()):
+        with self._cache_lock:
+            sessions = list(self._cache.values())
+        for session in sessions:
             try:
                 self._flush_session(session)
             except Exception as e:
@@ -459,9 +506,10 @@ class HonchoSessionManager:
 
     def delete(self, key: str) -> bool:
         """Delete a session from local cache."""
-        if key in self._cache:
-            del self._cache[key]
-            return True
+        with self._cache_lock:
+            if key in self._cache:
+                del self._cache[key]
+                return True
         return False
 
     def new_session(self, key: str) -> HonchoSession:
@@ -473,20 +521,25 @@ class HonchoSessionManager:
         """
         import time
 
-        # Remove old session from caches (but don't delete from Honcho)
-        old_session = self._cache.pop(key, None)
-        if old_session:
-            self._sessions_cache.pop(old_session.honcho_session_id, None)
+        # Hold the reentrant lock across get_or_create so a concurrent caller
+        # can't observe the (old-popped, new-not-yet-inserted) gap and create
+        # its own session under the raw key.  `_cache_lock` is an RLock so
+        # nested reacquisition inside get_or_create is safe.
+        with self._cache_lock:
+            # Remove old session from caches (but don't delete from Honcho)
+            old_session = self._cache.pop(key, None)
+            if old_session:
+                self._sessions_cache.pop(old_session.honcho_session_id, None)
 
-        # Create new session with timestamp suffix
-        timestamp = int(time.time())
-        new_key = f"{key}:{timestamp}"
+            # Create new session with timestamp suffix
+            timestamp = int(time.time())
+            new_key = f"{key}:{timestamp}"
 
-        # get_or_create will create a fresh session
-        session = self.get_or_create(new_key)
+            # get_or_create will create a fresh session
+            session = self.get_or_create(new_key)
 
-        # Cache under the original key so callers find it by the expected name
-        self._cache[key] = session
+            # Cache under the original key so callers find it by the expected name
+            self._cache[key] = session
 
         logger.info("Created new session for %s (honcho: %s)", key, session.honcho_session_id)
         return session
@@ -593,19 +646,20 @@ class HonchoSessionManager:
         with self._prefetch_cache_lock:
             return self._context_cache.pop(session_key, {})
 
-    def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
+    def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, Any]:
         """
         Pre-fetch user and AI peer context from Honcho.
 
         Fetches peer_representation and peer_card for both peers, plus the
-        session summary when available. search_query is intentionally omitted
-        — it would only affect additional excerpts that this code does not
-        consume, and passing the raw message exposes conversation content in
-        server access logs.
+        session summary when available. When user_message is provided, it is
+        passed as search_query to the peer context call so Honcho returns
+        conclusions relevant to the session topic rather than the full
+        observation dump.
 
         Args:
             session_key: The session key to get context for.
-            user_message: Unused; kept for call-site compatibility.
+            user_message: Optional first user message used as search_query for
+                          topic-relevant context retrieval.
 
         Returns:
             Dictionary with 'representation', 'card', 'ai_representation',
@@ -615,7 +669,7 @@ class HonchoSessionManager:
         if not session:
             return {}
 
-        result: dict[str, str] = {}
+        result: dict[str, Any] = {}
 
         # Session summary — provides session-scoped context.
         # Fresh sessions (per-session cold start, or first-ever per-directory)
@@ -627,11 +681,72 @@ class HonchoSessionManager:
                 ctx = honcho_session.context(summary=True)
                 if ctx.summary and getattr(ctx.summary, "content", None):
                     result["summary"] = ctx.summary.content
+                # DGM-H: ambient channel turns for public-mode persona.
+                # Gated by DGMH_HONCHO_INJECT_RECENT — reuses the same
+                # context() call (no extra Honcho round-trip).
+                if os.environ.get("DGMH_HONCHO_INJECT_RECENT"):
+                    msgs = getattr(ctx, "messages", None)
+                    if msgs:
+                        recent = msgs[-10:]
+                        result["recent_messages"] = [
+                            {
+                                "role": getattr(m, "peer_id", "unknown"),
+                                "content": (getattr(m, "content", None) or "")[:500],
+                            }
+                            for m in recent
+                        ]
         except Exception as e:
             logger.debug("Failed to fetch session summary from Honcho: %s", e)
 
+        # DGM-H: also surface channel-wide ambient context for public-mode.
+        # The agent's per-user session only sees that user's turns, so
+        # cross-user channel chatter is invisible without this merge.
+        # honcho_hook mirrors every channel message into the
+        # `discord-public-{channel_id}` session of the dgmh-flask workspace;
+        # pull from there and dedupe-merge with the per-user list above.
+        if os.environ.get("DGMH_HONCHO_INJECT_RECENT"):
+            try:
+                mirror_channel = _resolve_public_mirror_channel(session_key)
+                if mirror_channel:
+                    mirror_session_id = f"discord-public-{mirror_channel}"
+                    # Use the DGM-H workspace client — the hermes-builtin
+                    # workspace ("hermes") does not see the dgmh-flask
+                    # mirror writes.
+                    from dgmh.honcho_client import get_client as _dgmh_get_client
+
+                    dgmh_client = _dgmh_get_client()
+                    if dgmh_client is None:
+                        raise RuntimeError("dgmh honcho client unavailable")
+                    mirror_ctx = dgmh_client.session(mirror_session_id).context(
+                        summary=False
+                    )
+                    mirror_msgs = getattr(mirror_ctx, "messages", None) or []
+                    if mirror_msgs:
+                        existing = result.get("recent_messages", []) or []
+                        seen = {(m.get("role"), m.get("content")) for m in existing}
+                        merged = list(existing)
+                        for m in mirror_msgs[-15:]:
+                            item = {
+                                "role": getattr(m, "peer_id", "unknown"),
+                                "content": (getattr(m, "content", None) or "")[:500],
+                            }
+                            key_t = (item["role"], item["content"])
+                            if key_t in seen:
+                                continue
+                            seen.add(key_t)
+                            merged.append(item)
+                        result["recent_messages"] = merged[-15:]
+                        logger.info(
+                            "[honcho] public-mode mirror merge: channel=%s mirror_msgs=%d total_recent=%d",
+                            mirror_channel,
+                            len(mirror_msgs),
+                            len(result["recent_messages"]),
+                        )
+            except Exception as e:
+                logger.debug("Failed to fetch mirror channel context: %s", e)
+
         try:
-            user_ctx = self._fetch_peer_context(session.user_peer_id, target=session.user_peer_id)
+            user_ctx = self._fetch_peer_context(session.user_peer_id, search_query=user_message or None, target=session.user_peer_id)
             result["representation"] = user_ctx["representation"]
             result["card"] = "\n".join(user_ctx["card"])
         except Exception as e:

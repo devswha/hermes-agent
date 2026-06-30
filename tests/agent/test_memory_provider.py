@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from agent.memory_provider import MemoryProvider
-from agent.memory_manager import MemoryManager
+from agent.memory_manager import MemoryManager, route_memory_query
 
 # ---------------------------------------------------------------------------
 # Concrete test provider
@@ -75,6 +75,13 @@ class FakeMemoryProvider(MemoryProvider):
 
     def on_memory_write(self, action, target, content):
         self.memory_writes.append((action, target, content))
+
+
+class MetadataMemoryProvider(FakeMemoryProvider):
+    """Provider that opts into write metadata."""
+
+    def on_memory_write(self, action, target, content, metadata=None):
+        self.memory_writes.append((action, target, content, metadata or {}))
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +213,57 @@ class TestMemoryManager:
 
         result = mgr.prefetch_all("query")
         assert result == "Has memories"
+
+    def test_memory_router_prefetches_recall_queries(self):
+        route = route_memory_query("전에 내가 말한 말투 취향 기억나?")
+
+        assert route.should_prefetch is True
+        assert route.intent == "memory_recall"
+
+    def test_memory_router_skips_low_context_chatter(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "stale context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("ㅋㅋ")
+
+        assert result == ""
+        assert p.prefetch_queries == []
+
+    def test_memory_router_skips_current_fact_queries(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "old context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("지금 몇 시야?")
+
+        assert result == ""
+        assert p.prefetch_queries == []
+
+    def test_memory_router_current_fact_english_terms_are_word_bounded(self):
+        assert route_memory_query("runtime error from provider").should_prefetch is True
+        assert route_memory_query("validate this memory patch").should_prefetch is True
+        assert route_memory_query("candidate project context").should_prefetch is True
+        assert route_memory_query("what time is it?").should_prefetch is False
+
+    def test_memory_router_recall_cues_win_over_current_fact_cues(self):
+        route = route_memory_query("지금 전에 말한 프로젝트 기억나?")
+
+        assert route.should_prefetch is True
+        assert route.intent == "memory_recall"
+
+    def test_memory_router_allows_project_and_preference_queries(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "remembered project context"
+        mgr.add_provider(p)
+
+        result = mgr.prefetch_all("내가 선호하는 프로젝트 작업 방식 뭐였지?")
+
+        assert result == "remembered project context"
+        assert p.prefetch_queries == ["내가 선호하는 프로젝트 작업 방식 뭐였지?"]
 
     def test_queue_prefetch_all(self):
         mgr = MemoryManager()
@@ -861,6 +919,51 @@ class TestOnMemoryWriteBridge:
 
         mgr.on_memory_write("add", "memory", "new fact")
         assert p.memory_writes == [("add", "memory", "new fact")]
+
+    def test_on_memory_write_metadata_passed_to_opt_in_provider(self):
+        """Providers that accept metadata receive structured write provenance."""
+        mgr = MemoryManager()
+        p = MetadataMemoryProvider("ext")
+        mgr.add_provider(p)
+
+        mgr.on_memory_write(
+            "add",
+            "memory",
+            "new fact",
+            metadata={
+                "write_origin": "assistant_tool",
+                "execution_context": "foreground",
+                "session_id": "sess-1",
+            },
+        )
+
+        assert p.memory_writes == [
+            (
+                "add",
+                "memory",
+                "new fact",
+                {
+                    "write_origin": "assistant_tool",
+                    "execution_context": "foreground",
+                    "session_id": "sess-1",
+                },
+            )
+        ]
+
+    def test_on_memory_write_metadata_keeps_legacy_provider_compatible(self):
+        """Old 3-arg providers keep working when the manager receives metadata."""
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("ext")
+        mgr.add_provider(p)
+
+        mgr.on_memory_write(
+            "add",
+            "user",
+            "legacy provider fact",
+            metadata={"write_origin": "assistant_tool"},
+        )
+
+        assert p.memory_writes == [("add", "user", "legacy provider fact")]
 
     def test_on_memory_write_replace(self):
         """on_memory_write fires for 'replace' actions."""

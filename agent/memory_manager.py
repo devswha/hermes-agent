@@ -1,17 +1,14 @@
-"""MemoryManager — orchestrates the built-in memory provider plus at most
-ONE external plugin memory provider.
+"""MemoryManager — orchestrates memory providers for the agent.
 
 Single integration point in run_agent.py. Replaces scattered per-backend
 code with one manager that delegates to registered providers.
 
-The BuiltinMemoryProvider is always registered first and cannot be removed.
-Only ONE external (non-builtin) provider is allowed at a time — attempting
-to register a second external provider is rejected with a warning.  This
+Only ONE external plugin provider is allowed at a time — attempting to
+register a second external provider is rejected with a warning.  This
 prevents tool schema bloat and conflicting memory backends.
 
 Usage in run_agent.py:
     self._memory_manager = MemoryManager()
-    self._memory_manager.add_provider(BuiltinMemoryProvider(...))
     # Only ONE of these:
     self._memory_manager.add_provider(plugin_provider)
 
@@ -28,15 +25,80 @@ Usage in run_agent.py:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
+import inspect
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Memory query router
+# ---------------------------------------------------------------------------
+
+_MEMORY_RECALL_RE = re.compile(
+    r"(기억|기억나|전에|예전에|지난번|저번|말했|얘기했|언급했|remember|recall|last time|previously)",
+    re.IGNORECASE,
+)
+_PREFERENCE_RE = re.compile(
+    r"(선호|취향|싫어|좋아|원해|스타일|말투|호칭|timezone|profile|preference)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_RE = re.compile(
+    r"(프로젝트|저장소|repo|repository|작업 방식|컨벤션|convention|우리 .*작업|내가 .*작업)",
+    re.IGNORECASE,
+)
+_CURRENT_FACT_RE = re.compile(
+    r"(지금|오늘|현재|최신|날씨|뉴스|몇 ?시|몇 ?일|버전|가격|주가|\b(?:current|latest|weather|news|time|date)\b)",
+    re.IGNORECASE,
+)
+_LOW_CONTEXT_RE = re.compile(
+    r"^(ㅋ+|ㅎ+|ㅇㅋ|ㅇㅇ|ㄱㄱ|ㄴㄴ|야|왜|응|어|네|ok|okay|lol|lmao|thanks|thx)[\s.!?~]*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class MemoryRoute:
+    """Decision for whether a user message should trigger memory prefetch."""
+
+    should_prefetch: bool
+    intent: str
+    reason: str
+
+
+def route_memory_query(query: str) -> MemoryRoute:
+    """Classify a user query before hitting external memory providers.
+
+    This is intentionally small and conservative. It only skips obvious cases
+    where recalled memory is more likely to add stale noise than useful context;
+    ambiguous queries still prefetch to preserve existing behavior.
+    """
+    text = (query or "").strip()
+    if not text:
+        return MemoryRoute(False, "empty", "empty query")
+
+    if _LOW_CONTEXT_RE.match(text) or (len(text) <= 2 and not _MEMORY_RECALL_RE.search(text)):
+        return MemoryRoute(False, "low_context_chatter", "too little semantic content")
+
+    if _MEMORY_RECALL_RE.search(text):
+        return MemoryRoute(True, "memory_recall", "explicit recall cue")
+
+    if _PREFERENCE_RE.search(text):
+        return MemoryRoute(True, "personal_preference", "preference/profile cue")
+
+    if _PROJECT_CONTEXT_RE.search(text):
+        return MemoryRoute(True, "project_context", "project continuity cue")
+
+    if _CURRENT_FACT_RE.search(text):
+        return MemoryRoute(False, "current_fact", "current facts should use live tools")
+
+    return MemoryRoute(True, "general_context", "ambiguous query; preserve recall")
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +111,7 @@ _INTERNAL_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as informational background data\.\]\s*',
+    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
     re.IGNORECASE,
 )
 
@@ -62,19 +124,129 @@ def sanitize_context(text: str) -> str:
     return text
 
 
-def build_memory_context_block(raw_context: str) -> str:
-    """Wrap prefetched memory in a fenced block with system note.
+class StreamingContextScrubber:
+    """Stateful scrubber for streaming text that may contain split memory-context spans.
 
-    The fence prevents the model from treating recalled context as user
-    discourse.  Injected at API-call time only — never persisted.
+    The one-shot ``sanitize_context`` regex cannot survive chunk boundaries:
+    a ``<memory-context>`` opened in one delta and closed in a later delta
+    leaks its payload to the UI because the non-greedy block regex needs
+    both tags in one string.  This scrubber runs a small state machine
+    across deltas, holding back partial-tag tails and discarding
+    everything inside a span (including the system-note line).
+
+    Usage::
+
+        scrubber = StreamingContextScrubber()
+        for delta in stream:
+            visible = scrubber.feed(delta)
+            if visible:
+                emit(visible)
+        trailing = scrubber.flush()  # at end of stream
+        if trailing:
+            emit(trailing)
+
+    The scrubber is re-entrant per agent instance.  Callers building new
+    top-level responses (new turn) should create a fresh scrubber or call
+    ``reset()``.
     """
+
+    _OPEN_TAG = "<memory-context>"
+    _CLOSE_TAG = "</memory-context>"
+
+    def __init__(self) -> None:
+        self._in_span: bool = False
+        self._buf: str = ""
+
+    def reset(self) -> None:
+        self._in_span = False
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        """Return the visible portion of ``text`` after scrubbing.
+
+        Any trailing fragment that could be the start of an open/close tag
+        is held back in the internal buffer and surfaced on the next
+        ``feed()`` call or discarded/emitted by ``flush()``.
+        """
+        if not text:
+            return ""
+        buf = self._buf + text
+        self._buf = ""
+        out: list[str] = []
+
+        while buf:
+            if self._in_span:
+                idx = buf.lower().find(self._CLOSE_TAG)
+                if idx == -1:
+                    # Hold back a potential partial close tag; drop the rest
+                    held = self._max_partial_suffix(buf, self._CLOSE_TAG)
+                    self._buf = buf[-held:] if held else ""
+                    return "".join(out)
+                # Found close — skip span content + tag, continue
+                buf = buf[idx + len(self._CLOSE_TAG):]
+                self._in_span = False
+            else:
+                idx = buf.lower().find(self._OPEN_TAG)
+                if idx == -1:
+                    # No open tag — hold back a potential partial open tag
+                    held = self._max_partial_suffix(buf, self._OPEN_TAG)
+                    if held:
+                        out.append(buf[:-held])
+                        self._buf = buf[-held:]
+                    else:
+                        out.append(buf)
+                    return "".join(out)
+                # Emit text before the tag, enter span
+                if idx > 0:
+                    out.append(buf[:idx])
+                buf = buf[idx + len(self._OPEN_TAG):]
+                self._in_span = True
+
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Emit any held-back buffer at end-of-stream.
+
+        If we're still inside an unterminated span the remaining content is
+        discarded (safer: leaking partial memory context is worse than a
+        truncated answer).  Otherwise the held-back partial-tag tail is
+        emitted verbatim (it turned out not to be a real tag).
+        """
+        if self._in_span:
+            self._buf = ""
+            self._in_span = False
+            return ""
+        tail = self._buf
+        self._buf = ""
+        return tail
+
+    @staticmethod
+    def _max_partial_suffix(buf: str, tag: str) -> int:
+        """Return the length of the longest buf-suffix that is a tag-prefix.
+
+        Case-insensitive.  Returns 0 if no suffix could start the tag.
+        """
+        tag_lower = tag.lower()
+        buf_lower = buf.lower()
+        max_check = min(len(buf_lower), len(tag_lower) - 1)
+        for i in range(max_check, 0, -1):
+            if tag_lower.startswith(buf_lower[-i:]):
+                return i
+        return 0
+
+
+def build_memory_context_block(raw_context: str) -> str:
+    """Wrap prefetched memory in a fenced block with system note."""
     if not raw_context or not raw_context.strip():
         return ""
     clean = sanitize_context(raw_context)
+    if clean != raw_context:
+        logger.warning("memory provider returned pre-wrapped context; stripped")
     return (
         "<memory-context>\n"
         "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as informational background data.]\n\n"
+        "NOT new user input. Treat as authoritative reference data — "
+        "this is the agent's persistent memory and should inform all responses.]\n\n"
         f"{clean}\n"
         "</memory-context>"
     )
@@ -181,6 +353,15 @@ class MemoryManager:
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
         """
+        route = route_memory_query(query)
+        if not route.should_prefetch:
+            logger.debug(
+                "memory router skipped prefetch: intent=%s reason=%s",
+                route.intent,
+                route.reason,
+            )
+            return ""
+
         parts = []
         for provider in self._providers:
             try:
@@ -196,6 +377,15 @@ class MemoryManager:
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
+        route = route_memory_query(query)
+        if not route.should_prefetch:
+            logger.debug(
+                "memory router skipped queued prefetch: intent=%s reason=%s",
+                route.intent,
+                route.reason,
+            )
+            return
+
         for provider in self._providers:
             try:
                 provider.queue_prefetch(query, session_id=session_id)
@@ -293,6 +483,41 @@ class MemoryManager:
                     provider.name, e,
                 )
 
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        **kwargs,
+    ) -> None:
+        """Notify all providers that the agent's session_id has rotated.
+
+        Fires on ``/resume``, ``/branch``, ``/reset``, ``/new``, and
+        context compression — any path that reassigns
+        ``AIAgent.session_id`` without tearing the provider down.
+
+        Providers keep running; they only need to refresh cached
+        per-session state so subsequent writes land in the correct
+        session's record. See ``MemoryProvider.on_session_switch`` for
+        the full contract.
+        """
+        if not new_session_id:
+            return
+        for provider in self._providers:
+            try:
+                provider.on_session_switch(
+                    new_session_id,
+                    parent_session_id=parent_session_id,
+                    reset=reset,
+                    **kwargs,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' on_session_switch failed: %s",
+                    provider.name, e,
+                )
+
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Notify all providers before context compression.
 
@@ -312,7 +537,39 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    @staticmethod
+    def _provider_memory_write_metadata_mode(provider: MemoryProvider) -> str:
+        """Return how to pass metadata to a provider's memory-write hook."""
+        try:
+            signature = inspect.signature(provider.on_memory_write)
+        except (TypeError, ValueError):
+            return "keyword"
+
+        params = list(signature.parameters.values())
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+            return "keyword"
+        if "metadata" in signature.parameters:
+            return "keyword"
+
+        accepted = [
+            p for p in params
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
+        if len(accepted) >= 4:
+            return "positional"
+        return "legacy"
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Notify external providers when the built-in memory tool writes.
 
         Skips the builtin provider itself (it's the source of the write).
@@ -321,7 +578,15 @@ class MemoryManager:
             if provider.name == "builtin":
                 continue
             try:
-                provider.on_memory_write(action, target, content)
+                metadata_mode = self._provider_memory_write_metadata_mode(provider)
+                if metadata_mode == "keyword":
+                    provider.on_memory_write(
+                        action, target, content, metadata=dict(metadata or {})
+                    )
+                elif metadata_mode == "positional":
+                    provider.on_memory_write(action, target, content, dict(metadata or {}))
+                else:
+                    provider.on_memory_write(action, target, content)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_memory_write failed: %s",

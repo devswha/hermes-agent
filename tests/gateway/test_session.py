@@ -11,7 +11,14 @@ from gateway.session import (
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    canonical_whatsapp_identifier,
+    is_configured_shared_group_channel,
 )
+
+# Legacy name preserved for these tests; product renamed the function to
+# canonical_whatsapp_identifier.  Keep the tests referencing the old name
+# working without duplicating the suite.
+normalize_whatsapp_identifier = canonical_whatsapp_identifier
 
 
 class TestSessionSourceRoundtrip:
@@ -83,8 +90,13 @@ class TestSessionSourceRoundtrip:
         assert restored.chat_topic is None
         assert restored.chat_type == "dm"
 
-    def test_invalid_platform_raises(self):
-        with pytest.raises((ValueError, KeyError)):
+    def test_unknown_platform_rejected_for_bad_names(self):
+        """Arbitrary platform names are rejected (no accidental enum pollution).
+
+        Only bundled platform plugins (discovered under ``plugins/platforms/``)
+        and runtime-registered plugins get dynamic enum members.
+        """
+        with pytest.raises(ValueError):
             SessionSource.from_dict({"platform": "nonexistent", "chat_id": "1"})
 
 
@@ -183,6 +195,25 @@ class TestBuildSessionContextPrompt:
         assert "Telegram" in prompt
         assert "Home Chat" in prompt
 
+    def test_bluebubbles_prompt_mentions_short_conversational_i_message_format(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.BLUEBUBBLES: PlatformConfig(enabled=True, extra={"server_url": "http://localhost:1234", "password": "secret"}),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.BLUEBUBBLES,
+            chat_id="iMessage;-;user@example.com",
+            chat_name="Ben",
+            chat_type="dm",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "responding via iMessage" in prompt
+        assert "short and conversational" in prompt
+        assert "blank line" in prompt
+
     def test_discord_prompt(self):
         config = GatewayConfig(
             platforms={
@@ -224,6 +255,7 @@ class TestBuildSessionContextPrompt:
         assert "Slack" in prompt
         assert "cannot search" in prompt.lower()
         assert "pin" in prompt.lower()
+        assert "current message's slack block/attachment payload" in prompt.lower()
 
     def test_discord_prompt_with_channel_topic(self):
         """Channel topic should appear in the session context prompt."""
@@ -377,6 +409,65 @@ class TestBuildSessionContextPrompt:
         assert "Multi-user session" in prompt
         assert "[sender name]" in prompt
         assert "**User:** Alice" not in prompt
+
+    def test_dgmh_public_discord_channel_is_shared_room_context(self):
+        """DGM-H public Discord channels should share one room transcript."""
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_name="Server / #에이전트대전",
+            chat_type="group",
+            user_id="266436073557590016",
+            user_name="하코",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            ctx = build_session_context(source, config)
+            prompt = build_session_context_prompt(ctx)
+
+        assert ctx.shared_multi_user_session is True
+        assert "Multi-user session" in prompt
+        assert "Public-channel reply contract" in prompt
+        assert "Public register is locked to Korean 해요체-casual" in prompt
+        assert "mirror another bot's 반말" in prompt
+        assert "mix 반말 and 해요체" in prompt
+        assert "Do not reveal, mention, or quote Flask Self Wiki" in prompt
+        assert "**User:** 하코" not in prompt
+
+    def test_dgmh_public_prompt_discloses_self_evolution_when_active(self):
+        """Public prompt should tell flask to disclose active self-development."""
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_name="Server / #에이전트대전",
+            chat_type="group",
+            user_id="266436073557590016",
+            user_name="하코",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "DGMH_PUBLIC_CHANNELS": "1496735735078715542",
+                "DGMH_SELF_EVOLVING": "1",
+                "DGMH_SELF_EVOLUTION_NOTICE": "지금 자체진화 중이에요.",
+            },
+        ):
+            ctx = build_session_context(source, config)
+            prompt = build_session_context_prompt(ctx)
+
+        assert "Self-development status" in prompt
+        assert "지금 자체진화 중이에요." in prompt
 
     def test_dm_thread_shows_user_not_multi(self):
         """DM threads are single-user and should show User, not multi-user note."""
@@ -626,9 +717,9 @@ class TestSessionStoreSwitchSession:
         db.close()
 
 
-class TestWhatsAppDMSessionKeyConsistency:
-    """Regression: all session-key construction must go through build_session_key
-    so DMs are isolated by chat_id across platforms."""
+class TestWhatsAppSessionKeyConsistency:
+    """Regression: WhatsApp session keys must collapse JID/LID aliases to a
+    single stable identity for both DM chat_ids and group participant_ids."""
 
     @pytest.fixture()
     def store(self, tmp_path):
@@ -639,7 +730,7 @@ class TestWhatsAppDMSessionKeyConsistency:
         s._loaded = True
         return s
 
-    def test_whatsapp_dm_includes_chat_id(self):
+    def test_whatsapp_dm_uses_canonical_identifier(self):
         source = SessionSource(
             platform=Platform.WHATSAPP,
             chat_id="15551234567@s.whatsapp.net",
@@ -647,7 +738,80 @@ class TestWhatsAppDMSessionKeyConsistency:
             user_name="Phone User",
         )
         key = build_session_key(source)
-        assert key == "agent:main:whatsapp:dm:15551234567@s.whatsapp.net"
+        assert key == "agent:main:whatsapp:dm:15551234567"
+
+    def test_whatsapp_dm_aliases_share_one_session_key(self, tmp_path, monkeypatch):
+        tmp_home = tmp_path / "hermes-home"
+        mapping_dir = tmp_home / "whatsapp" / "session"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "lid-mapping-999999999999999.json").write_text(
+            json.dumps("15551234567@s.whatsapp.net"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_home))
+
+        lid_source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="999999999999999@lid",
+            chat_type="dm",
+            user_name="Phone User",
+        )
+        phone_source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="15551234567@s.whatsapp.net",
+            chat_type="dm",
+            user_name="Phone User",
+        )
+
+        assert build_session_key(lid_source) == "agent:main:whatsapp:dm:15551234567"
+        assert build_session_key(phone_source) == "agent:main:whatsapp:dm:15551234567"
+
+    def test_whatsapp_group_participant_aliases_share_session_key(self, tmp_path, monkeypatch):
+        """With group_sessions_per_user, the same human flipping between
+        phone-JID and LID inside a group must not produce two isolated
+        per-user sessions."""
+        tmp_home = tmp_path / "hermes-home"
+        mapping_dir = tmp_home / "whatsapp" / "session"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "lid-mapping-999999999999999.json").write_text(
+            json.dumps("15551234567@s.whatsapp.net"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_home))
+
+        lid_source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="120363000000000000@g.us",
+            chat_type="group",
+            user_id="999999999999999@lid",
+            user_name="Group Member",
+        )
+        phone_source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="120363000000000000@g.us",
+            chat_type="group",
+            user_id="15551234567@s.whatsapp.net",
+            user_name="Group Member",
+        )
+
+        expected = "agent:main:whatsapp:group:120363000000000000@g.us:15551234567"
+        assert build_session_key(lid_source, group_sessions_per_user=True) == expected
+        assert build_session_key(phone_source, group_sessions_per_user=True) == expected
+
+    def test_whatsapp_group_shared_sessions_untouched_by_canonicalisation(self):
+        """When group_sessions_per_user is False, participant_id is not in the
+        key at all, so canonicalisation is a no-op for this mode."""
+        source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="120363000000000000@g.us",
+            chat_type="group",
+            user_id="999999999999999@lid",
+            user_name="Group Member",
+        )
+        assert (
+            build_session_key(source, group_sessions_per_user=False)
+            == "agent:main:whatsapp:group:120363000000000000@g.us"
+        )
 
     def test_store_delegates_to_build_session_key(self, store):
         """SessionStore._generate_session_key must produce the same result."""
@@ -753,6 +917,37 @@ class TestWhatsAppDMSessionKeyConsistency:
         assert build_session_key(first) == "agent:main:discord:group:guild-123:alice"
         assert build_session_key(second) == "agent:main:discord:group:guild-123:bob"
         assert build_session_key(first) != build_session_key(second)
+
+    def test_dgmh_public_discord_groups_share_session_key(self):
+        first = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_type="group",
+            user_id="alice",
+        )
+        second = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="1496735735078715542",
+            chat_type="group",
+            user_id="bob",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            assert is_configured_shared_group_channel(first) is True
+            assert build_session_key(first) == "agent:main:discord:group:1496735735078715542"
+            assert build_session_key(second) == "agent:main:discord:group:1496735735078715542"
+
+    def test_dgmh_public_override_does_not_affect_non_public_discord_group(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+        )
+
+        with patch.dict("os.environ", {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"}):
+            assert is_configured_shared_group_channel(source) is False
+            assert build_session_key(source) == "agent:main:discord:group:guild-123:alice"
 
     def test_group_sessions_can_be_shared_when_isolation_disabled(self):
         first = SessionSource(
@@ -864,6 +1059,57 @@ class TestWhatsAppDMSessionKeyConsistency:
         key = build_session_key(source)
         # DM logic: chat_id + thread_id, user_id never included
         assert key == "agent:main:telegram:dm:99:topic-1"
+
+
+class TestWhatsAppIdentifierPublicHelpers:
+    """Contract tests for the public WhatsApp identifier helpers.
+
+    These helpers are part of the public API for plugins that need
+    WhatsApp identity awareness. Breaking these contracts is a
+    breaking change for downstream plugins.
+    """
+
+    def test_normalize_strips_jid_suffix(self):
+        assert normalize_whatsapp_identifier("60123456789@s.whatsapp.net") == "60123456789"
+
+    def test_normalize_strips_lid_suffix(self):
+        assert normalize_whatsapp_identifier("999999999999999@lid") == "999999999999999"
+
+    def test_normalize_strips_device_suffix(self):
+        assert normalize_whatsapp_identifier("60123456789:47@s.whatsapp.net") == "60123456789"
+
+    def test_normalize_strips_leading_plus(self):
+        assert normalize_whatsapp_identifier("+60123456789") == "60123456789"
+
+    def test_normalize_handles_bare_numeric(self):
+        assert normalize_whatsapp_identifier("60123456789") == "60123456789"
+
+    def test_normalize_handles_empty_and_none(self):
+        assert normalize_whatsapp_identifier("") == ""
+        assert normalize_whatsapp_identifier(None) == ""  # type: ignore[arg-type]
+
+    def test_canonical_without_mapping_returns_normalized(self, tmp_path, monkeypatch):
+        """With no bridge mapping files, the normalized input is returned."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert canonical_whatsapp_identifier("60123456789@lid") == "60123456789"
+
+    def test_canonical_walks_lid_mapping(self, tmp_path, monkeypatch):
+        """LID is resolved to its paired phone identity via lid-mapping files."""
+        mapping_dir = tmp_path / "whatsapp" / "session"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "lid-mapping-999999999999999.json").write_text(
+            json.dumps("15551234567@s.whatsapp.net"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        canonical = canonical_whatsapp_identifier("999999999999999@lid")
+        assert canonical == "15551234567"
+        assert canonical_whatsapp_identifier("15551234567@s.whatsapp.net") == "15551234567"
+
+    def test_canonical_empty_input(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        assert canonical_whatsapp_identifier("") == ""
 
 
 class TestSessionStoreEntriesAttribute:
@@ -1087,3 +1333,45 @@ class TestRewriteTranscriptPreservesReasoning:
         assert after[0].get("reasoning_content") == "provider scratchpad"
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
+
+    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "test.db")
+        session_id = "atomic-rewrite-test"
+        db.create_session(session_id=session_id, source="cli")
+        db.append_message(session_id=session_id, role="user", content="before user")
+        db.append_message(session_id=session_id, role="assistant", content="before assistant")
+
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = db
+        store._loaded = True
+
+        # Force the second insert inside replace_messages to fail, simulating
+        # any storage-layer error that might abort a multi-row rewrite.
+        real_encode = SessionDB._encode_content
+        calls = {"n": 0}
+
+        def flaky_encode(cls, content):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated storage failure")
+            return real_encode.__func__(cls, content)
+
+        monkeypatch.setattr(SessionDB, "_encode_content", classmethod(flaky_encode))
+
+        replacement = [
+            {"role": "user", "content": "after user"},
+            {"role": "assistant", "content": "after assistant"},
+        ]
+
+        store.rewrite_transcript(session_id, replacement)
+
+        # The rewrite must roll back atomically — original messages preserved.
+        after = db.get_messages_as_conversation(session_id)
+        assert [msg["content"] for msg in after] == [
+            "before user",
+            "before assistant",
+        ]

@@ -1,4 +1,5 @@
 import pytest
+from unittest import mock
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
@@ -68,3 +69,34 @@ async def test_preprocess_keeps_plain_text_for_default_group_sessions():
     )
 
     assert result == "hello"
+
+
+@pytest.mark.asyncio
+async def test_preprocess_prefixes_sender_for_dgmh_public_discord_channel():
+    runner = _make_runner(
+        GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+    )
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="1496735735078715542",
+        chat_name="Server / #에이전트대전",
+        chat_type="group",
+        user_name="Alex",
+    )
+    event = MessageEvent(text="정신챙겨봐", source=source)
+
+    with mock.patch.dict(
+        "os.environ",
+        {"DGMH_PUBLIC_CHANNELS": "1496735735078715542"},
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result == "[Alex] 정신챙겨봐"
